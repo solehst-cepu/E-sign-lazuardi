@@ -363,7 +363,8 @@ export function LoginPage() {
                   />
                   {health?.initialSuperAdminEmailHint && (
                     <p className="mt-1 text-[11px] text-slate-500">
-                      Gunakan email yang sesuai dengan konfigurasi INITIAL_SUPERADMIN_EMAIL.
+                      Gunakan email yang sesuai dengan konfigurasi <code className="font-mono">INITIAL_SUPERADMIN_EMAIL</code>
+                      {health.initialSuperAdminEmailMasked ? ` (${health.initialSuperAdminEmailMasked})` : ''}.
                     </p>
                   )}
                 </div>

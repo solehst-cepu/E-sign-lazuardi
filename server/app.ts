@@ -57,6 +57,25 @@ async function writeAuditLog(
   }
 }
 
+function getInitialSuperAdminEmail(): string {
+  const raw = (process.env.INITIAL_SUPERADMIN_EMAIL || '')
+    .trim()
+    .replace(/^["']|["']$/g, '')
+    .trim()
+    .toLowerCase();
+  if (!raw || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(raw) || raw.startsWith('my_') || raw.includes('example.com')) {
+    return '';
+  }
+  return raw;
+}
+
+function maskEmail(email: string): string {
+  const [local, domain] = email.split('@');
+  if (!local || !domain) return '';
+  const visible = local.slice(0, Math.min(2, local.length));
+  return `${visible}***@${domain}`;
+}
+
 async function requireAuth(req: AuthenticatedRequest, res: Response, next: NextFunction) {
   if (!isSupabaseConfigured()) {
     return res.status(503).json({ error: 'Konfigurasi Supabase belum lengkap.' });
@@ -92,10 +111,7 @@ async function requireAuth(req: AuthenticatedRequest, res: Response, next: NextF
         .select('id', { count: 'exact', head: true })
         .eq('role', 'super_admin');
 
-      const expectedEmail = process.env.INITIAL_SUPERADMIN_EMAIL?.trim()
-        .replace(/^["']|["']$/g, '')
-        .trim()
-        .toLowerCase();
+      const expectedEmail = getInitialSuperAdminEmail();
       const userEmail = (userData.user.email || '').trim().toLowerCase();
 
       if ((superCount || 0) === 0 && userEmail && (!expectedEmail || userEmail === expectedEmail)) {
@@ -204,6 +220,23 @@ export function createApiApp() {
         .select('id', { count: 'exact', head: true })
         .eq('role', 'super_admin');
 
+      // If zero super_admins exist and INITIAL_SUPERADMIN_EMAIL already signed up via client fallback,
+      // confirm its email so first-time Super Admin login works even when mailer_autoconfirm is disabled.
+      const expectedEmail = getInitialSuperAdminEmail();
+      if ((count || 0) === 0 && expectedEmail) {
+        try {
+          const { data: usersPage } = await supabase.auth.admin.listUsers({ page: 1, perPage: 100 });
+          const targetAuth = usersPage?.users?.find(
+            (u) => (u.email || '').trim().toLowerCase() === expectedEmail
+          );
+          if (targetAuth && !targetAuth.email_confirmed_at) {
+            await supabase.auth.admin.updateUserById(targetAuth.id, { email_confirm: true });
+          }
+        } catch {
+          // Ignore admin listUsers transient errors during health check
+        }
+      }
+
       const { data: settings } = await supabase
         .from('system_settings')
         .select('app_name, organization_name, maintenance_mode, max_file_size_mb, qr_enabled')
@@ -220,7 +253,8 @@ export function createApiApp() {
         organizationName: settings?.organization_name || 'Sekolah & Yayasan Lazuardi',
         maxFileSizeMb: settings?.max_file_size_mb || 5,
         qrEnabled: settings?.qr_enabled !== false,
-        initialSuperAdminEmailHint: process.env.INITIAL_SUPERADMIN_EMAIL ? true : false,
+        initialSuperAdminEmailHint: Boolean(expectedEmail),
+        initialSuperAdminEmailMasked: (count || 0) === 0 && expectedEmail ? maskEmail(expectedEmail) : null,
         publicSupabaseConfig: { url, anonKey },
       });
     } catch (err: any) {
@@ -246,13 +280,10 @@ export function createApiApp() {
       return res.status(400).json({ error: 'Password minimal 8 karakter.' });
     }
 
-    const expectedEmail = process.env.INITIAL_SUPERADMIN_EMAIL?.trim()
-      .replace(/^["']|["']$/g, '')
-      .trim()
-      .toLowerCase();
+    const expectedEmail = getInitialSuperAdminEmail();
     if (expectedEmail && String(email).trim().toLowerCase() !== expectedEmail) {
       return res.status(403).json({
-        error: 'Email harus sesuai dengan INITIAL_SUPERADMIN_EMAIL yang dikonfigurasi pada server.',
+        error: `Email harus sesuai dengan INITIAL_SUPERADMIN_EMAIL pada server (${maskEmail(expectedEmail)}).`,
       });
     }
 
@@ -305,6 +336,61 @@ export function createApiApp() {
       return res.json({ ok: true, message: 'Super Admin pertama berhasil dibuat. Silakan login.' });
     } catch (err: any) {
       return res.status(500).json({ error: err?.message || 'Gagal membuat Super Admin.' });
+    }
+  });
+
+  // Confirm initial Super Admin email only when zero super_admin exist and password matches
+  app.post('/api/auth/confirm-initial-superadmin', async (req: Request, res: Response) => {
+    if (!isSupabaseConfigured()) {
+      return res.status(503).json({ error: 'Konfigurasi Supabase belum tersedia.' });
+    }
+    const { email, password } = req.body || {};
+    const normalizedEmail = String(email || '').trim().toLowerCase();
+    if (!normalizedEmail || !password) {
+      return res.status(400).json({ error: 'Email dan password wajib diisi.' });
+    }
+
+    const expectedEmail = getInitialSuperAdminEmail();
+    if (expectedEmail && normalizedEmail !== expectedEmail) {
+      return res.status(403).json({
+        error: `Email harus sesuai dengan INITIAL_SUPERADMIN_EMAIL pada server (${maskEmail(expectedEmail)}).`,
+      });
+    }
+
+    try {
+      const supabase = getSupabaseAdmin();
+      const { count } = await supabase
+        .from('profiles')
+        .select('id', { count: 'exact', head: true })
+        .eq('role', 'super_admin');
+      if ((count || 0) > 0) {
+        return res.status(409).json({ error: 'Super Admin sudah dikonfigurasi.' });
+      }
+
+      const { data: usersPage } = await supabase.auth.admin.listUsers({ page: 1, perPage: 100 });
+      const targetAuth = usersPage?.users?.find(
+        (u) => (u.email || '').trim().toLowerCase() === normalizedEmail
+      );
+      if (!targetAuth) {
+        return res.status(404).json({ error: 'Akun belum terdaftar di Supabase Auth.' });
+      }
+
+      if (!targetAuth.email_confirmed_at) {
+        await supabase.auth.admin.updateUserById(targetAuth.id, { email_confirm: true });
+      }
+
+      const stateless = createStatelessAuthClient();
+      const { error: verifyErr } = await stateless.auth.signInWithPassword({
+        email: normalizedEmail,
+        password: String(password),
+      });
+      if (verifyErr) {
+        return res.status(401).json({ error: 'Email atau password tidak valid.' });
+      }
+
+      return res.json({ ok: true });
+    } catch (err: any) {
+      return res.status(500).json({ error: err?.message || 'Gagal mengonfirmasi Super Admin awal.' });
     }
   });
 

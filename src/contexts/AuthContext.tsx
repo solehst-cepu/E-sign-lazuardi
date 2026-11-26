@@ -21,6 +21,7 @@ export interface SystemHealth {
   maxFileSizeMb?: number;
   qrEnabled?: boolean;
   initialSuperAdminEmailHint?: boolean;
+  initialSuperAdminEmailMasked?: string | null;
   publicSupabaseConfig?: { url: string; anonKey: string };
   error?: string;
 }
@@ -153,14 +154,47 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const signIn = async (email: string, password: string) => {
     if (!supabase) throw new Error('Supabase belum dikonfigurasi.');
     setAuthError(null);
-    const { data, error } = await supabase.auth.signInWithPassword({
-      email: email.trim().toLowerCase(),
+    const normalizedEmail = email.trim().toLowerCase();
+
+    let { data, error } = await supabase.auth.signInWithPassword({
+      email: normalizedEmail,
       password,
     });
+
+    if (error && (error.message || '').toLowerCase().includes('email not confirmed') && !health?.hasSuperAdmin) {
+      let confirmRejection: string | null = null;
+      try {
+        const confirmRes = await fetch('/api/auth/confirm-initial-superadmin', {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: normalizedEmail, password }),
+        });
+        const { data: confirmData } = await parseJsonWithDiagnostic<{ ok?: boolean; error?: string }>(confirmRes);
+        if (!confirmRes.ok && confirmData?.error) {
+          confirmRejection = confirmData.error;
+        }
+      } catch {
+        // Ignore if proxy blocks POST; refreshHealth also handles initial super_admin confirmation safely
+      }
+      if (confirmRejection) {
+        throw new Error(confirmRejection);
+      }
+      await refreshHealth();
+      const retry = await supabase.auth.signInWithPassword({
+        email: normalizedEmail,
+        password,
+      });
+      data = retry.data;
+      error = retry.error;
+    }
+
     if (error || !data.session) {
       const msg = error?.message || '';
       if (msg.toLowerCase().includes('email not confirmed')) {
-        throw new Error('Email belum dikonfirmasi pada Supabase Auth.');
+        throw new Error(
+          'Email belum dikonfirmasi pada Supabase Auth. Cek inbox email Anda atau klik Confirm User pada menu Authentication > Users di Supabase Dashboard.'
+        );
       }
       if (msg.toLowerCase().includes('invalid login credentials')) {
         throw new Error('Email atau password tidak valid.');
