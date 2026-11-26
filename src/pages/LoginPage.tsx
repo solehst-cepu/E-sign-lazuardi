@@ -1,10 +1,10 @@
 import React, { useState } from 'react';
 import { Navigate } from 'react-router-dom';
-import { AlertCircle, CheckCircle2, Eye, EyeOff, KeyRound, Lock, Mail, ShieldCheck } from 'lucide-react';
+import { AlertCircle, ExternalLink, Eye, EyeOff, KeyRound, Lock, Mail, RefreshCw, ShieldCheck } from 'lucide-react';
 import { BrandLogo } from '../components/BrandLogo';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
-import { parseJsonSafe, supabase } from '../lib/supabaseClient';
+import { parseJsonWithDiagnostic, supabase } from '../lib/supabaseClient';
 
 export function LoginPage() {
   const { session, profile, health, loading, signIn, refreshHealth } = useAuth();
@@ -72,13 +72,17 @@ export function LoginPage() {
     }
   };
 
+  const [proxyBlocked, setProxyBlocked] = useState(false);
+
   const handleBootstrapSuperAdmin = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg(null);
+    setProxyBlocked(false);
     setBootSubmitting(true);
     try {
       const res = await fetch('/api/bootstrap-superadmin', {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           full_name: bootName,
@@ -88,12 +92,23 @@ export function LoginPage() {
           password: bootPassword,
         }),
       });
-      const data = await parseJsonSafe<{ ok?: boolean; error?: string }>(res);
+      const { data, htmlTitle } = await parseJsonWithDiagnostic<{ ok?: boolean; error?: string }>(res);
       if (!res.ok) {
-        throw new Error(data?.error || `Gagal membuat Super Admin (HTTP ${res.status}). Pastikan server backend aktif.`);
+        if (data?.error) {
+          throw new Error(data.error);
+        }
+        setProxyBlocked(true);
+        throw new Error(
+          `Permintaan diblokir oleh proxy sebelum mencapai server backend (HTTP ${res.status}${
+            htmlTitle ? `: ${htmlTitle}` : ''
+          }). Buka aplikasi di tab baru atau pastikan cookie sesi preview aktif.`
+        );
       }
       if (!data) {
-        throw new Error('Server mengembalikan respons yang tidak valid. Pastikan endpoint API berjalan.');
+        setProxyBlocked(true);
+        throw new Error(
+          `Server mengembalikan respons HTML (${htmlTitle || 'bukan JSON'}). Silakan buka aplikasi di tab baru dan coba lagi.`
+        );
       }
       showToast('Super Admin pertama berhasil dibuat. Silakan login.', 'success');
       setEmail(bootEmail);
@@ -107,7 +122,11 @@ export function LoginPage() {
   };
 
   const showBootstrapView = Boolean(
-    health && health.supabaseConfigured && !health.hasSuperAdmin && bootstrapMode === 'bootstrap'
+    health &&
+      health.apiReachable !== false &&
+      health.supabaseConfigured &&
+      !health.hasSuperAdmin &&
+      bootstrapMode === 'bootstrap'
   );
 
   return (
@@ -158,6 +177,37 @@ export function LoginPage() {
                 <p className="mt-1 text-xs">{health.error}</p>
               </div>
             </div>
+          ) : health && health.apiReachable === false ? (
+            <div className="space-y-4">
+              <div className="flex items-start gap-3 rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+                <AlertCircle className="h-5 w-5 shrink-0 text-[#F59E0B] mt-0.5" />
+                <div>
+                  <p className="font-semibold">Koneksi API Backend Tertahan Proxy</p>
+                  <p className="mt-1 text-xs leading-relaxed text-amber-800">
+                    {health.healthError || 'Permintaan API diblokir di dalam iframe (sering terjadi jika cookie pihak ketiga dibatasi browser).'}
+                  </p>
+                </div>
+              </div>
+              <div className="flex flex-col sm:flex-row gap-2">
+                <a
+                  href={typeof window !== 'undefined' ? window.location.href : '/'}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-lg bg-[#1755CE] px-4 py-2.5 text-xs font-semibold text-white hover:bg-[#1244A8]"
+                >
+                  <ExternalLink className="h-3.5 w-3.5" />
+                  Buka Aplikasi di Tab Baru
+                </a>
+                <button
+                  type="button"
+                  onClick={() => refreshHealth()}
+                  className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                >
+                  <RefreshCw className="h-3.5 w-3.5" />
+                  Coba Lagi
+                </button>
+              </div>
+            </div>
           ) : showBootstrapView ? (
             <div>
               <div className="mb-4 flex rounded-lg bg-slate-100 p-1 gap-1">
@@ -194,9 +244,22 @@ export function LoginPage() {
               </div>
 
               {errorMsg && (
-                <div className="mb-4 flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2.5 text-xs text-[#DC2626]">
-                  <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
-                  <span>{errorMsg}</span>
+                <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2.5 text-xs text-[#DC2626] space-y-2">
+                  <div className="flex items-start gap-2">
+                    <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
+                    <span>{errorMsg}</span>
+                  </div>
+                  {proxyBlocked && (
+                    <a
+                      href={typeof window !== 'undefined' ? window.location.href : '/'}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1.5 rounded-md bg-white border border-red-200 px-2.5 py-1.5 text-[11px] font-semibold text-[#1755CE] hover:bg-blue-50"
+                    >
+                      <ExternalLink className="h-3.5 w-3.5" />
+                      Buka Aplikasi di Tab Baru
+                    </a>
+                  )}
                 </div>
               )}
 

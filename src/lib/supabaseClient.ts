@@ -41,12 +41,24 @@ export async function getAccessToken(): Promise<string | null> {
 }
 
 export async function parseJsonSafe<T = any>(res: Response): Promise<T | null> {
+  const { data } = await parseJsonWithDiagnostic<T>(res);
+  return data;
+}
+
+export async function parseJsonWithDiagnostic<T = any>(
+  res: Response
+): Promise<{ data: T | null; htmlTitle: string | null; rawText: string }> {
   const text = await res.text();
-  if (!text) return null;
+  if (!text) return { data: null, htmlTitle: null, rawText: '' };
   try {
-    return JSON.parse(text) as T;
+    return { data: JSON.parse(text) as T, htmlTitle: null, rawText: text };
   } catch {
-    return null;
+    const titleMatch = text.match(/<title[^>]*>([^<]+)<\/title>/i);
+    return {
+      data: null,
+      htmlTitle: titleMatch ? titleMatch[1].trim() : null,
+      rawText: text.slice(0, 200),
+    };
   }
 }
 
@@ -64,23 +76,29 @@ export async function apiFetch<T = any>(
   }
 
   const res = await fetch(url, {
+    credentials: 'include',
     ...options,
     headers,
   });
 
-  const contentType = res.headers.get('content-type') || '';
-  const data = contentType.includes('application/json') ? await parseJsonSafe(res) : null;
+  const { data, htmlTitle } = await parseJsonWithDiagnostic(res);
 
   if (!res.ok) {
-    const message =
-      data && typeof data === 'object' && 'error' in data && typeof (data as any).error === 'string'
-        ? (data as any).error
-        : `Terjadi kesalahan pada server (HTTP ${res.status}).`;
-    throw new Error(message);
+    if (data && typeof data === 'object' && 'error' in data && typeof (data as any).error === 'string') {
+      throw new Error((data as any).error);
+    }
+    if (res.status === 403 && htmlTitle) {
+      throw new Error(
+        `Akses diblokir oleh proxy preview (HTTP 403: ${htmlTitle}). Silakan buka aplikasi di tab baru agar cookie sesi aktif.`
+      );
+    }
+    throw new Error(`Terjadi kesalahan pada server (HTTP ${res.status}${htmlTitle ? `: ${htmlTitle}` : ''}).`);
   }
 
   if (data === null) {
-    throw new Error('Respons server tidak valid (bukan JSON). Pastikan backend API aktif.');
+    throw new Error(
+      `Respons server tidak valid (bukan JSON${htmlTitle ? `: ${htmlTitle}` : ''}). Coba buka aplikasi di tab baru.`
+    );
   }
 
   return data as T;

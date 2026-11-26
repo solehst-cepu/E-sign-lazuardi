@@ -4,13 +4,15 @@ import {
   apiFetch,
   ensureSupabaseClient,
   isClientSupabaseConfigured,
-  parseJsonSafe,
+  parseJsonWithDiagnostic,
   supabase,
 } from '../lib/supabaseClient';
 import { SystemSettings, UserProfile } from '../types';
 
 export interface SystemHealth {
   ok: boolean;
+  apiReachable?: boolean;
+  healthError?: string;
   supabaseConfigured: boolean;
   hasSuperAdmin: boolean;
   maintenanceMode: boolean;
@@ -50,23 +52,28 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const refreshHealth = useCallback(async () => {
     try {
-      const res = await fetch('/api/health');
-      const data = await parseJsonSafe<SystemHealth>(res);
+      const res = await fetch('/api/health', { credentials: 'include' });
+      const { data, htmlTitle } = await parseJsonWithDiagnostic<SystemHealth>(res);
       if (!data) {
-        throw new Error('Respons /api/health bukan JSON.');
+        throw new Error(
+          `Backend /api/health mengembalikan respons bukan JSON (HTTP ${res.status}${htmlTitle ? `: ${htmlTitle}` : ''}).`
+        );
       }
       if (data.publicSupabaseConfig?.url && data.publicSupabaseConfig?.anonKey) {
         ensureSupabaseClient(data.publicSupabaseConfig.url, data.publicSupabaseConfig.anonKey);
       }
       setHealth({
         ...data,
+        apiReachable: true,
         supabaseConfigured: Boolean(data.supabaseConfigured && (isClientSupabaseConfigured || supabase)),
       });
-    } catch {
+    } catch (err: any) {
       setHealth({
         ok: false,
+        apiReachable: false,
+        healthError: err?.message || 'Tidak dapat terhubung ke server backend.',
         supabaseConfigured: isClientSupabaseConfigured,
-        hasSuperAdmin: false,
+        hasSuperAdmin: true,
         maintenanceMode: false,
         appName: 'LAZUARDI e-SIGN',
       });
@@ -166,12 +173,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setSession(data.session);
     try {
       await refreshMe();
-      await apiFetch('/api/auth/audit-login', { method: 'POST' });
     } catch (err: any) {
       await supabase.auth.signOut();
       setSession(null);
       setProfile(null);
       throw err;
+    }
+    try {
+      await apiFetch('/api/auth/audit-login', { method: 'POST' });
+    } catch {
+      // Non-fatal: audit log failure should not invalidate an authenticated session
     }
   };
 

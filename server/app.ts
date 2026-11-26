@@ -92,7 +92,10 @@ async function requireAuth(req: AuthenticatedRequest, res: Response, next: NextF
         .select('id', { count: 'exact', head: true })
         .eq('role', 'super_admin');
 
-      const expectedEmail = process.env.INITIAL_SUPERADMIN_EMAIL?.trim().toLowerCase();
+      const expectedEmail = process.env.INITIAL_SUPERADMIN_EMAIL?.trim()
+        .replace(/^["']|["']$/g, '')
+        .trim()
+        .toLowerCase();
       const userEmail = (userData.user.email || '').trim().toLowerCase();
 
       if ((superCount || 0) === 0 && userEmail && (!expectedEmail || userEmail === expectedEmail)) {
@@ -232,7 +235,10 @@ export function createApiApp() {
       return res.status(400).json({ error: 'Password minimal 8 karakter.' });
     }
 
-    const expectedEmail = process.env.INITIAL_SUPERADMIN_EMAIL?.trim().toLowerCase();
+    const expectedEmail = process.env.INITIAL_SUPERADMIN_EMAIL?.trim()
+      .replace(/^["']|["']$/g, '')
+      .trim()
+      .toLowerCase();
     if (expectedEmail && String(email).trim().toLowerCase() !== expectedEmail) {
       return res.status(403).json({
         error: 'Email harus sesuai dengan INITIAL_SUPERADMIN_EMAIL yang dikonfigurasi pada server.',
