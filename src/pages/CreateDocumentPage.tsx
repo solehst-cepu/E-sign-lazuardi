@@ -353,126 +353,59 @@ export function CreateDocumentPage() {
     setSelectedFieldId(newField.localId);
   };
 
-  // Save draft to Supabase (document + upload PDF + signers + signature_fields)
+  // Save draft via backend API (document + upload PDF + signers + signature_fields)
   const persistDraft = async (): Promise<string> => {
-    if (!supabase || !profile) throw new Error('Sesi tidak valid.');
+    if (!profile) throw new Error('Sesi tidak valid.');
     if (!title.trim() || !documentNumber.trim()) {
       throw new Error('Judul dokumen dan nomor dokumen wajib diisi.');
     }
 
-    let currentDocId = docId;
+    const saved = await apiFetch<{ data: { id: string; version_number: number } }>('/api/documents/save-draft', {
+      method: 'POST',
+      body: JSON.stringify({
+        id: docId,
+        document_number: documentNumber.trim(),
+        title: title.trim(),
+        document_type_id: documentTypeId || null,
+        unit_id: unitId || null,
+        department_id: departmentId || null,
+        description: description.trim() || null,
+        document_date: documentDate,
+        due_date: dueDate || null,
+        priority,
+        workflow_template_id: selectedTemplateId || null,
+        include_history_page: includeHistoryPage,
+        signers: signers.map((s) => ({
+          localId: s.localId,
+          user_id: s.user_id,
+          action_type: s.action_type,
+          is_mandatory: s.is_mandatory,
+        })),
+        fields: fields.map((f) => ({
+          signer_id: f.signer_id,
+          page_number: f.page_number,
+          x_percent: f.x_percent,
+          y_percent: f.y_percent,
+          width_percent: f.width_percent,
+          height_percent: f.height_percent,
+        })),
+      }),
+    });
 
-    if (!currentDocId) {
-      const { data: inserted, error: insErr } = await supabase
-        .from('documents')
-        .insert({
-          document_number: documentNumber.trim(),
-          title: title.trim(),
-          document_type_id: documentTypeId || null,
-          unit_id: unitId || null,
-          department_id: departmentId || null,
-          description: description.trim() || null,
-          document_date: documentDate,
-          due_date: dueDate || null,
-          priority,
-          status: 'draft',
-          workflow_template_id: selectedTemplateId || null,
-          include_history_page: includeHistoryPage,
-          created_by: profile.id,
-        })
-        .select('id')
-        .single();
-
-      if (insErr || !inserted) throw new Error(insErr?.message || 'Gagal membuat draft dokumen.');
-      currentDocId = inserted.id;
-      setDocId(currentDocId);
-    } else {
-      const { error: updErr } = await supabase
-        .from('documents')
-        .update({
-          document_number: documentNumber.trim(),
-          title: title.trim(),
-          document_type_id: documentTypeId || null,
-          unit_id: unitId || null,
-          department_id: departmentId || null,
-          description: description.trim() || null,
-          document_date: documentDate,
-          due_date: dueDate || null,
-          priority,
-          workflow_template_id: selectedTemplateId || null,
-          include_history_page: includeHistoryPage,
-        })
-        .eq('id', currentDocId);
-
-      if (updErr) throw new Error(updErr.message);
-    }
-
-    if (!currentDocId) {
-      throw new Error('ID dokumen tidak tersedia.');
-    }
-    const resolvedDocId: string = currentDocId;
+    const resolvedDocId = saved.data.id;
+    setDocId(resolvedDocId);
 
     // Upload PDF if a new file was selected
     if (pdfFile) {
       const formData = new FormData();
       formData.append('document_id', resolvedDocId);
-      formData.append('version_number', '1');
+      formData.append('version_number', String(saved.data.version_number || 1));
       formData.append('file', pdfFile);
       await apiFetch('/api/documents/upload-pdf', {
         method: 'POST',
         body: formData,
       });
       setPdfFile(null); // Avoid re-uploading unless changed
-    }
-
-    // Replace draft signers & signature fields atomically
-    await supabase.from('signature_fields').delete().eq('document_id', resolvedDocId).eq('version_number', 1);
-    await supabase.from('document_signers').delete().eq('document_id', resolvedDocId);
-
-    const localToDbSigner = new Map<string, string>();
-    if (signers.length > 0) {
-      const signerRows = signers.map((s, idx) => ({
-        document_id: resolvedDocId,
-        user_id: s.user_id,
-        step_order: idx + 1,
-        action_type: s.action_type,
-        status: 'pending',
-        is_mandatory: s.is_mandatory,
-      }));
-      const { data: insertedSigners, error: sigErr } = await supabase
-        .from('document_signers')
-        .insert(signerRows)
-        .select('id, step_order');
-
-      if (sigErr) throw new Error(sigErr.message);
-
-      for (const row of insertedSigners || []) {
-        const localSigner = signers[row.step_order - 1];
-        if (localSigner) {
-          localToDbSigner.set(localSigner.localId, row.id);
-        }
-      }
-    }
-
-    if (fields.length > 0) {
-      const fieldRows = fields
-        .filter((f) => localToDbSigner.has(f.signer_id) || f.signer_id.length === 36)
-        .map((f) => ({
-          document_id: resolvedDocId,
-          version_number: 1,
-          signer_id: localToDbSigner.get(f.signer_id) || f.signer_id,
-          page_number: f.page_number,
-          x_percent: f.x_percent,
-          y_percent: f.y_percent,
-          width_percent: f.width_percent,
-          height_percent: f.height_percent,
-          field_type: 'signature',
-        }));
-
-      if (fieldRows.length > 0) {
-        const { error: fldErr } = await supabase.from('signature_fields').insert(fieldRows);
-        if (fldErr) throw new Error(fldErr.message);
-      }
     }
 
     return resolvedDocId;

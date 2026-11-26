@@ -905,8 +905,168 @@ export function createApiApp() {
   );
 
   // ============================================================================
-  // DOCUMENTS: PDF UPLOAD, SUBMIT, SEQUENTIAL ACTION, REVISION, DOWNLOAD
+  // DOCUMENTS: SAVE DRAFT, PDF UPLOAD, SUBMIT, SEQUENTIAL ACTION, REVISION, DOWNLOAD
   // ============================================================================
+  app.post('/api/documents/save-draft', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    const {
+      id,
+      document_number,
+      title,
+      document_type_id,
+      unit_id,
+      department_id,
+      description,
+      document_date,
+      due_date,
+      priority,
+      workflow_template_id,
+      include_history_page,
+      signers,
+      fields,
+    } = req.body || {};
+
+    if (!title || !String(title).trim() || !document_number || !String(document_number).trim()) {
+      return res.status(400).json({ error: 'Judul dokumen dan nomor dokumen wajib diisi.' });
+    }
+
+    const cleanPriority = priority === 'urgent' ? 'urgent' : 'normal';
+    const supabase = getSupabaseAdmin();
+    let resolvedDocId = id ? String(id).trim() : '';
+    let targetVersion = 1;
+
+    if (resolvedDocId) {
+      const { data: existingDoc, error: findErr } = await supabase
+        .from('documents')
+        .select('*')
+        .eq('id', resolvedDocId)
+        .single();
+
+      if (findErr || !existingDoc) {
+        return res.status(404).json({ error: 'Draft dokumen tidak ditemukan.' });
+      }
+      if (existingDoc.created_by !== req.profile!.id) {
+        return res.status(403).json({ error: 'Anda tidak berwenang mengubah dokumen ini.' });
+      }
+      if (existingDoc.is_locked || !['draft', 'needs_revision'].includes(existingDoc.status)) {
+        return res.status(400).json({ error: 'Dokumen sudah terkunci dan tidak dapat diubah.' });
+      }
+
+      targetVersion = existingDoc.current_version || 1;
+
+      const { error: updErr } = await supabase
+        .from('documents')
+        .update({
+          document_number: String(document_number).trim(),
+          title: String(title).trim(),
+          document_type_id: document_type_id || null,
+          unit_id: unit_id || null,
+          department_id: department_id || null,
+          description: description ? String(description).trim() : null,
+          document_date: document_date || new Date().toISOString().slice(0, 10),
+          due_date: due_date || null,
+          priority: cleanPriority,
+          workflow_template_id: workflow_template_id || null,
+          include_history_page: include_history_page !== false,
+        })
+        .eq('id', resolvedDocId);
+
+      if (updErr) return res.status(400).json({ error: updErr.message });
+    } else {
+      const { data: inserted, error: insErr } = await supabase
+        .from('documents')
+        .insert({
+          document_number: String(document_number).trim(),
+          title: String(title).trim(),
+          document_type_id: document_type_id || null,
+          unit_id: unit_id || null,
+          department_id: department_id || null,
+          description: description ? String(description).trim() : null,
+          document_date: document_date || new Date().toISOString().slice(0, 10),
+          due_date: due_date || null,
+          priority: cleanPriority,
+          status: 'draft',
+          is_locked: false,
+          workflow_template_id: workflow_template_id || null,
+          include_history_page: include_history_page !== false,
+          created_by: req.profile!.id,
+        })
+        .select('id')
+        .single();
+
+      if (insErr || !inserted) {
+        return res.status(400).json({ error: insErr?.message || 'Gagal membuat draft dokumen.' });
+      }
+      resolvedDocId = inserted.id;
+    }
+
+    // Replace draft signers & signature fields atomically via service role
+    const { error: delFldErr } = await supabase
+      .from('signature_fields')
+      .delete()
+      .eq('document_id', resolvedDocId)
+      .eq('version_number', targetVersion);
+    if (delFldErr) return res.status(400).json({ error: delFldErr.message });
+
+    const { error: delSigErr } = await supabase
+      .from('document_signers')
+      .delete()
+      .eq('document_id', resolvedDocId);
+    if (delSigErr) return res.status(400).json({ error: delSigErr.message });
+
+    const signerList = Array.isArray(signers) ? signers : [];
+    const localToDbSigner = new Map<string, string>();
+
+    if (signerList.length > 0) {
+      const signerRows = signerList.map((s: any, idx: number) => ({
+        document_id: resolvedDocId,
+        user_id: s.user_id,
+        step_order: idx + 1,
+        action_type: ['review', 'approve', 'sign'].includes(s.action_type) ? s.action_type : 'sign',
+        status: 'pending',
+        is_mandatory: Boolean(s.is_mandatory),
+      }));
+
+      const { data: insertedSigners, error: sigErr } = await supabase
+        .from('document_signers')
+        .insert(signerRows)
+        .select('id, step_order');
+
+      if (sigErr) return res.status(400).json({ error: sigErr.message });
+
+      for (const row of insertedSigners || []) {
+        const localSigner = signerList[row.step_order - 1];
+        if (localSigner?.localId) {
+          localToDbSigner.set(String(localSigner.localId), row.id);
+        }
+      }
+    }
+
+    const fieldList = Array.isArray(fields) ? fields : [];
+    if (fieldList.length > 0) {
+      const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      const fieldRows = fieldList
+        .map((f: any) => ({
+          document_id: resolvedDocId,
+          version_number: targetVersion,
+          signer_id: localToDbSigner.get(String(f.signer_id)) || (uuidRegex.test(String(f.signer_id)) ? String(f.signer_id) : ''),
+          page_number: Math.max(1, Number(f.page_number) || 1),
+          x_percent: Number(f.x_percent) || 0,
+          y_percent: Number(f.y_percent) || 0,
+          width_percent: Number(f.width_percent) || 24,
+          height_percent: Number(f.height_percent) || 11,
+          field_type: 'signature',
+        }))
+        .filter((f) => Boolean(f.signer_id));
+
+      if (fieldRows.length > 0) {
+        const { error: fldErr } = await supabase.from('signature_fields').insert(fieldRows);
+        if (fldErr) return res.status(400).json({ error: fldErr.message });
+      }
+    }
+
+    return res.json({ data: { id: resolvedDocId, version_number: targetVersion } });
+  });
+
   app.post(
     '/api/documents/upload-pdf',
     requireAuth,
@@ -1194,15 +1354,48 @@ export function createApiApp() {
     const { data: doc } = await supabase.from('documents').select('*').eq('id', docId).single();
     if (!doc) return res.status(404).json({ error: 'Dokumen tidak ditemukan.' });
 
+    const nextVer = parseInt(String(new_version || doc.current_version + 1), 10);
+
+    // Clone signature field placements onto the new version if not yet created
+    const { count: existingFieldCount } = await supabase
+      .from('signature_fields')
+      .select('id', { count: 'exact' })
+      .eq('document_id', docId)
+      .eq('version_number', nextVer)
+      .limit(1);
+
+    if ((existingFieldCount || 0) === 0) {
+      const { data: prevFields } = await supabase
+        .from('signature_fields')
+        .select('*')
+        .eq('document_id', docId)
+        .eq('version_number', doc.current_version);
+      if (prevFields && prevFields.length > 0) {
+        await supabase.from('signature_fields').insert(
+          prevFields.map((f: any) => ({
+            document_id: docId,
+            version_number: nextVer,
+            signer_id: f.signer_id,
+            page_number: f.page_number,
+            x_percent: f.x_percent,
+            y_percent: f.y_percent,
+            width_percent: f.width_percent,
+            height_percent: f.height_percent,
+            field_type: f.field_type || 'signature',
+          }))
+        );
+      }
+    }
+
     const { data: result, error: rpcErr } = await supabase.rpc('fn_resubmit_revised_document', {
       p_document_id: docId,
       p_user_id: req.profile!.id,
-      p_new_version: parseInt(String(new_version || doc.current_version + 1), 10),
+      p_new_version: nextVer,
     });
 
     if (rpcErr) return res.status(400).json({ error: rpcErr.message });
 
-    await writeAuditLog(req.profile!.id, 'DOCUMENT_RESUBMITTED', docId, { new_version }, req);
+    await writeAuditLog(req.profile!.id, 'DOCUMENT_RESUBMITTED', docId, { new_version: nextVer }, req);
     return res.json({ data: result });
   });
 

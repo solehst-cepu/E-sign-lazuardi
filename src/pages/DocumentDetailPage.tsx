@@ -249,22 +249,6 @@ export function DocumentDetailPage() {
         body: formData,
       });
 
-      // Duplicate signature field placements onto the new version number
-      if (fields.length > 0) {
-        const clonedFields = fields.map((f) => ({
-          document_id: doc.id,
-          version_number: nextVersion,
-          signer_id: f.signer_id,
-          page_number: f.page_number,
-          x_percent: f.x_percent,
-          y_percent: f.y_percent,
-          width_percent: f.width_percent,
-          height_percent: f.height_percent,
-          field_type: f.field_type,
-        }));
-        await supabase.from('signature_fields').insert(clonedFields);
-      }
-
       await apiFetch(`/api/documents/${doc.id}/resubmit`, {
         method: 'POST',
         body: JSON.stringify({ new_version: nextVersion }),

@@ -847,7 +847,7 @@ CREATE POLICY "Admins can manage workflow templates" ON public.workflow_template
 DROP POLICY IF EXISTS "Users can read accessible documents" ON public.documents;
 CREATE POLICY "Users can read accessible documents" ON public.documents
   FOR SELECT TO authenticated
-  USING (public.user_can_access_document(id));
+  USING (created_by = auth.uid() OR public.user_can_access_document(id));
 
 DROP POLICY IF EXISTS "Active users can create own draft documents" ON public.documents;
 CREATE POLICY "Active users can create own draft documents" ON public.documents

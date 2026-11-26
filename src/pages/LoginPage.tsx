@@ -32,6 +32,7 @@ export function LoginPage() {
   const [bootEmployeeId, setBootEmployeeId] = useState('');
   const [bootPassword, setBootPassword] = useState('');
   const [bootSubmitting, setBootSubmitting] = useState(false);
+  const [proxyBlocked, setProxyBlocked] = useState(false);
 
   if (!loading && session && profile) {
     if (profile.must_change_password) {
@@ -72,8 +73,6 @@ export function LoginPage() {
       setForgotSending(false);
     }
   };
-
-  const [proxyBlocked, setProxyBlocked] = useState(false);
 
   const handleBootstrapSuperAdmin = async (e: React.FormEvent) => {
     e.preventDefault();
