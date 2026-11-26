@@ -104,13 +104,19 @@ async function requireAuth(req: AuthenticatedRequest, res: Response, next: NextF
           userEmail.split('@')[0] ||
           'Super Admin';
 
+        const fallbackJob =
+          (userData.user.user_metadata?.job_title as string) || 'Super Administrator';
+        const fallbackEmployeeId =
+          (userData.user.user_metadata?.employee_id as string) || null;
+
         const { data: createdProf, error: createProfErr } = await supabase
           .from('profiles')
           .insert({
             id: userData.user.id,
             email: userEmail,
             full_name: fallbackName,
-            job_title: 'Super Administrator',
+            job_title: fallbackJob,
+            employee_id: fallbackEmployeeId,
             role: 'super_admin',
             is_active: true,
             must_change_password: false,
@@ -173,6 +179,11 @@ export function createApiApp() {
   const app = express();
   app.set('trust proxy', 1);
   app.use(express.json({ limit: '5mb' }));
+  app.use('/api', (_req: Request, res: Response, next: NextFunction) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    next();
+  });
 
   // Health & Bootstrap check
   app.get('/api/health', async (_req: Request, res: Response) => {

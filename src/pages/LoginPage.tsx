@@ -1,13 +1,13 @@
 import React, { useState } from 'react';
 import { Navigate } from 'react-router-dom';
-import { AlertCircle, ExternalLink, Eye, EyeOff, KeyRound, Lock, Mail, RefreshCw, ShieldCheck } from 'lucide-react';
+import { AlertCircle, CheckCircle2, ExternalLink, Eye, EyeOff, KeyRound, Lock, Mail, RefreshCw, ShieldCheck } from 'lucide-react';
 import { BrandLogo } from '../components/BrandLogo';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
-import { parseJsonWithDiagnostic, supabase } from '../lib/supabaseClient';
+import { ensureSupabaseClient, parseJsonWithDiagnostic, supabase } from '../lib/supabaseClient';
 
 export function LoginPage() {
-  const { session, profile, health, loading, signIn, refreshHealth } = useAuth();
+  const { session, profile, health, loading, signIn, refreshMe, refreshHealth } = useAuth();
   const { showToast } = useToast();
 
   const [email, setEmail] = useState('');
@@ -15,6 +15,7 @@ export function LoginPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [infoMsg, setInfoMsg] = useState<string | null>(null);
 
   // Forgot password modal state
   const [forgotOpen, setForgotOpen] = useState(false);
@@ -77,8 +78,10 @@ export function LoginPage() {
   const handleBootstrapSuperAdmin = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg(null);
+    setInfoMsg(null);
     setProxyBlocked(false);
     setBootSubmitting(true);
+    const normalizedEmail = bootEmail.trim().toLowerCase();
     try {
       const res = await fetch('/api/bootstrap-superadmin', {
         method: 'POST',
@@ -86,34 +89,85 @@ export function LoginPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           full_name: bootName,
-          email: bootEmail,
+          email: normalizedEmail,
           job_title: bootJob,
           employee_id: bootEmployeeId || null,
           password: bootPassword,
         }),
       });
       const { data, htmlTitle } = await parseJsonWithDiagnostic<{ ok?: boolean; error?: string }>(res);
-      if (!res.ok) {
-        if (data?.error) {
-          throw new Error(data.error);
+      if (res.ok && data) {
+        showToast('Super Admin pertama berhasil dibuat. Silakan login.', 'success');
+        setEmail(normalizedEmail);
+        setInfoMsg('Akun Super Admin berhasil dibuat. Silakan login di bawah ini.');
+        setBootstrapMode('login');
+        await refreshHealth();
+        return;
+      }
+
+      if (data?.error) {
+        throw new Error(data.error);
+      }
+
+      // Proxy returned non-JSON HTML (e.g. HTTP 403 from preview proxy): fall back to direct Supabase Auth registration
+      const client =
+        ensureSupabaseClient(health?.publicSupabaseConfig?.url, health?.publicSupabaseConfig?.anonKey) || supabase;
+
+      if (!client) {
+        setProxyBlocked(true);
+        throw new Error(
+          `Permintaan diblokir oleh proxy (HTTP ${res.status}${htmlTitle ? `: ${htmlTitle}` : ''}). Silakan buka aplikasi di tab baru.`
+        );
+      }
+
+      const { data: signUpData, error: signUpErr } = await client.auth.signUp({
+        email: normalizedEmail,
+        password: bootPassword,
+        options: {
+          data: {
+            full_name: bootName.trim(),
+            job_title: bootJob.trim() || 'Super Administrator',
+            employee_id: bootEmployeeId.trim() || null,
+          },
+        },
+      });
+
+      if (signUpErr) {
+        const msg = signUpErr.message || '';
+        if (msg.toLowerCase().includes('already') || msg.toLowerCase().includes('registered')) {
+          setEmail(normalizedEmail);
+          setBootstrapMode('login');
+          setInfoMsg('Email ini sudah terdaftar di Supabase Auth. Silakan login menggunakan password Anda.');
+          return;
         }
         setProxyBlocked(true);
         throw new Error(
-          `Permintaan diblokir oleh proxy sebelum mencapai server backend (HTTP ${res.status}${
-            htmlTitle ? `: ${htmlTitle}` : ''
-          }). Buka aplikasi di tab baru atau pastikan cookie sesi preview aktif.`
+          `${msg} (Proxy preview juga mengembalikan HTTP ${res.status}. Coba buka aplikasi di tab baru.)`
         );
       }
-      if (!data) {
-        setProxyBlocked(true);
-        throw new Error(
-          `Server mengembalikan respons HTML (${htmlTitle || 'bukan JSON'}). Silakan buka aplikasi di tab baru dan coba lagi.`
-        );
+
+      if (signUpData.session) {
+        try {
+          await refreshMe();
+          showToast('Super Admin pertama berhasil dibuat dan masuk.', 'success');
+          return;
+        } catch {
+          // If /api/me is also blocked in iframe, guide user to open in new tab
+          setProxyBlocked(true);
+          setEmail(normalizedEmail);
+          setBootstrapMode('login');
+          setInfoMsg('Akun dibuat, namun koneksi API tertahan proxy preview. Klik "Buka Aplikasi di Tab Baru" lalu login.');
+          return;
+        }
       }
-      showToast('Super Admin pertama berhasil dibuat. Silakan login.', 'success');
-      setEmail(bootEmail);
+
+      // Email confirmation enabled on Supabase project
+      setEmail(normalizedEmail);
       setBootstrapMode('login');
-      await refreshHealth();
+      setInfoMsg(
+        'Akun berhasil didaftarkan ke Supabase Auth. Silakan konfirmasi email Anda (atau klik Confirm User di Supabase Dashboard > Authentication > Users), lalu login di bawah ini.'
+      );
+      showToast('Pendaftaran dikirim. Konfirmasi email lalu login.', 'success');
     } catch (err: any) {
       setErrorMsg(err?.message || 'Gagal membuat Super Admin.');
     } finally {
@@ -364,10 +418,30 @@ export function LoginPage() {
                 Gunakan email dan password yang diberikan oleh Admin Lazuardi.
               </p>
 
+              {infoMsg && (
+                <div className="mt-4 flex items-start gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2.5 text-xs text-emerald-900">
+                  <CheckCircle2 className="h-4 w-4 shrink-0 text-[#16A34A] mt-0.5" />
+                  <span>{infoMsg}</span>
+                </div>
+              )}
+
               {errorMsg && (
-                <div className="mt-4 flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2.5 text-xs text-[#DC2626]">
-                  <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
-                  <span>{errorMsg}</span>
+                <div className="mt-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2.5 text-xs text-[#DC2626] space-y-2">
+                  <div className="flex items-start gap-2">
+                    <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
+                    <span>{errorMsg}</span>
+                  </div>
+                  {proxyBlocked && (
+                    <a
+                      href={typeof window !== 'undefined' ? window.location.href : '/'}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1.5 rounded-md bg-white border border-red-200 px-2.5 py-1.5 text-[11px] font-semibold text-[#1755CE] hover:bg-blue-50"
+                    >
+                      <ExternalLink className="h-3.5 w-3.5" />
+                      Buka Aplikasi di Tab Baru
+                    </a>
+                  )}
                 </div>
               )}
 
