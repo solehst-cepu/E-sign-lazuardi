@@ -17,6 +17,26 @@ export function isSupabaseConfigured(): boolean {
   return Boolean(url && anonKey && serviceRoleKey);
 }
 
+export function getServiceRoleKeyIssue(): string | null {
+  const { serviceRoleKey } = getSupabaseConfig();
+  if (!serviceRoleKey) return 'SUPABASE_SERVICE_ROLE_KEY belum diisi.';
+  if (serviceRoleKey.startsWith('sb_publishable_')) {
+    return 'SUPABASE_SERVICE_ROLE_KEY diisi dengan Publishable Key (sb_publishable_...). Ganti dengan Secret / service_role key dari Supabase Settings > API.';
+  }
+  const parts = serviceRoleKey.split('.');
+  if (parts.length === 3) {
+    try {
+      const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+      if (payload?.role === 'anon') {
+        return 'SUPABASE_SERVICE_ROLE_KEY terdeteksi menggunakan Anon Key (role: anon). Ganti dengan service_role key dari Supabase Settings > API.';
+      }
+    } catch {
+      // Non-JWT or malformed token; let Supabase validate
+    }
+  }
+  return null;
+}
+
 let cachedAdmin: SupabaseClient | null = null;
 
 export function getSupabaseAdmin(): SupabaseClient {

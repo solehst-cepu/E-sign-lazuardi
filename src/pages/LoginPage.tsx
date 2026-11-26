@@ -224,12 +224,26 @@ export function LoginPage() {
               </div>
             </div>
           ) : health && health.error ? (
-            <div className="flex items-start gap-3 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-[#DC2626]">
-              <AlertCircle className="h-5 w-5 shrink-0 mt-0.5" />
-              <div>
-                <p className="font-semibold">Migrasi Database Belum Dijalankan</p>
-                <p className="mt-1 text-xs">{health.error}</p>
+            <div className="space-y-4">
+              <div className="flex items-start gap-3 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-[#DC2626]">
+                <AlertCircle className="h-5 w-5 shrink-0 mt-0.5" />
+                <div>
+                  <p className="font-semibold">
+                    {health.error.toLowerCase().includes('permission') || health.error.toLowerCase().includes('key')
+                      ? 'Izin Akses Database Diperlukan'
+                      : 'Migrasi Database Belum Dijalankan'}
+                  </p>
+                  <p className="mt-1 text-xs leading-relaxed">{health.error}</p>
+                </div>
               </div>
+              <button
+                type="button"
+                onClick={() => refreshHealth()}
+                className="w-full inline-flex items-center justify-center gap-1.5 rounded-lg border border-slate-300 bg-white px-4 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50"
+              >
+                <RefreshCw className="h-3.5 w-3.5" />
+                Periksa Ulang Koneksi Database
+              </button>
             </div>
           ) : health && health.apiReachable === false ? (
             <div className="space-y-4">

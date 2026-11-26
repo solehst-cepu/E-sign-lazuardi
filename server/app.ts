@@ -4,7 +4,13 @@ import type { NextFunction, Request, Response } from 'express';
 import multer from 'multer';
 import { PDFDocument } from 'pdf-lib';
 import { generateAndStoreFinalPdf } from './pdfFinalizer.ts';
-import { createStatelessAuthClient, getSupabaseAdmin, getSupabaseConfig, isSupabaseConfigured } from './supabase.ts';
+import {
+  createStatelessAuthClient,
+  getServiceRoleKeyIssue,
+  getSupabaseAdmin,
+  getSupabaseConfig,
+  isSupabaseConfigured,
+} from './supabase.ts';
 
 interface AuthenticatedRequest extends Request {
   authUser?: {
@@ -230,12 +236,40 @@ export function createApiApp() {
       });
     }
 
+    const keyIssue = getServiceRoleKeyIssue();
+    if (keyIssue) {
+      return res.status(500).json({
+        ok: false,
+        supabaseConfigured: true,
+        hasSuperAdmin: false,
+        maintenanceMode: false,
+        appName: 'LAZUARDI e-SIGN',
+        error: keyIssue,
+      });
+    }
+
     try {
       const supabase = getSupabaseAdmin();
-      const { count } = await supabase
+      const { count, error: countErr } = await supabase
         .from('profiles')
-        .select('id', { count: 'exact', head: true })
-        .eq('role', 'super_admin');
+        .select('id', { count: 'exact' })
+        .eq('role', 'super_admin')
+        .limit(1);
+
+      if (countErr) {
+        const msg = countErr.message || 'permission denied for table profiles';
+        const hint = msg.toLowerCase().includes('permission denied')
+          ? ' Jalankan skrip GRANT pada file supabase/migrations/002_grant_permissions.sql di Supabase SQL Editor.'
+          : '';
+        return res.status(500).json({
+          ok: false,
+          supabaseConfigured: true,
+          hasSuperAdmin: false,
+          maintenanceMode: false,
+          appName: 'LAZUARDI e-SIGN',
+          error: `Database error (profiles): ${msg}.${hint}`,
+        });
+      }
 
       // If zero super_admins exist and INITIAL_SUPERADMIN_EMAIL already signed up via client fallback,
       // confirm its email so first-time Super Admin login works even when mailer_autoconfirm is disabled.
@@ -254,11 +288,22 @@ export function createApiApp() {
         }
       }
 
-      const { data: settings } = await supabase
+      const { data: settings, error: settingsErr } = await supabase
         .from('system_settings')
         .select('app_name, organization_name, maintenance_mode, max_file_size_mb, qr_enabled')
         .eq('id', 1)
         .maybeSingle();
+
+      if (settingsErr) {
+        return res.status(500).json({
+          ok: false,
+          supabaseConfigured: true,
+          hasSuperAdmin: (count || 0) > 0,
+          maintenanceMode: false,
+          appName: 'LAZUARDI e-SIGN',
+          error: `Database error (system_settings): ${settingsErr.message}`,
+        });
+      }
 
       const { url, anonKey } = getSupabaseConfig();
       return res.json({

@@ -1033,3 +1033,16 @@ INSERT INTO public.master_data (category, code, name, sort_order) VALUES
   ('document_type', 'SK', 'Surat Keputusan', 9),
   ('document_type', 'LAP', 'Laporan', 10)
 ON CONFLICT (category, name) DO NOTHING;
+
+-- ============================================================================
+-- 8. EXPLICIT POSTGRESQL GRANTS (Required for PostgREST / Supabase API)
+-- ============================================================================
+
+GRANT USAGE ON SCHEMA public TO postgres, anon, authenticated, service_role;
+GRANT ALL ON ALL TABLES IN SCHEMA public TO postgres, service_role;
+GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO postgres, service_role;
+GRANT ALL ON ALL ROUTINES IN SCHEMA public TO postgres, service_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO authenticated;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO authenticated;
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO authenticated;
+
