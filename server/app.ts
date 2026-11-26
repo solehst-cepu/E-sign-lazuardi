@@ -840,50 +840,104 @@ export function createApiApp() {
     return res.json({ data: sigProfile ? { ...sigProfile, signed_image_url: signedImageUrl } : null });
   });
 
+  app.post('/api/signature-profile/create-upload-url', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    const { file_size, mime_type } = req.body || {};
+    if (mime_type && mime_type !== 'image/png') {
+      return res.status(400).json({ error: 'Gambar tanda tangan harus berformat PNG.' });
+    }
+    const sizeNum = Number(file_size || 0);
+    if (!Number.isFinite(sizeNum) || sizeNum <= 0) {
+      return res.status(400).json({ error: 'File gambar tanda tangan PNG wajib disediakan.' });
+    }
+    if (sizeNum > 2 * 1024 * 1024) {
+      return res.status(400).json({ error: 'Ukuran gambar tanda tangan maksimal 2 MB.' });
+    }
+
+    const supabase = getSupabaseAdmin();
+    const filePath = `${req.profile!.id}/signature-${Date.now()}.png`;
+    const { data, error } = await supabase.storage.from('signatures').createSignedUploadUrl(filePath);
+    if (error || !data) {
+      return res.status(400).json({ error: error?.message || 'Gagal menyiapkan URL unggah tanda tangan.' });
+    }
+
+    return res.json({
+      data: {
+        path: data.path,
+        token: data.token,
+        signedUrl: data.signedUrl,
+      },
+    });
+  });
+
   app.post(
     '/api/signature-profile/save',
     requireAuth,
     upload.single('image'),
     async (req: AuthenticatedRequest, res: Response) => {
       const supabase = getSupabaseAdmin();
-      const signatureType = String(req.body.signature_type || 'typed');
+      const signatureType = String(req.body?.signature_type || 'typed');
       if (!['draw', 'upload', 'typed'].includes(signatureType)) {
         return res.status(400).json({ error: 'Jenis tanda tangan tidak valid.' });
       }
 
+      const pngHeader = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
       let imagePath: string | null = null;
-      if (signatureType === 'draw' || signatureType === 'upload') {
-        if (!req.file) {
-          return res.status(400).json({ error: 'File gambar tanda tangan PNG wajib disediakan.' });
-        }
-        if (req.file.mimetype !== 'image/png') {
-          return res.status(400).json({ error: 'Gambar tanda tangan harus berformat PNG.' });
-        }
-        // Validate PNG signature header
-        const pngHeader = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
-        if (req.file.buffer.length < 8 || !req.file.buffer.subarray(0, 4).equals(pngHeader)) {
-          return res.status(400).json({ error: 'File gambar bukan PNG yang valid.' });
-        }
-        if (req.file.size > 2 * 1024 * 1024) {
-          return res.status(400).json({ error: 'Ukuran gambar tanda tangan maksimal 2 MB.' });
-        }
 
-        imagePath = `${req.profile!.id}/signature-${Date.now()}.png`;
-        const { error: upErr } = await supabase.storage
-          .from('signatures')
-          .upload(imagePath, req.file.buffer, {
-            contentType: 'image/png',
-            upsert: true,
-          });
-        if (upErr) return res.status(400).json({ error: upErr.message });
+      if (signatureType === 'draw' || signatureType === 'upload') {
+        const providedPath = req.body?.image_path ? String(req.body.image_path).trim() : '';
+
+        if (providedPath) {
+          if (!providedPath.startsWith(`${req.profile!.id}/`) || providedPath.includes('..')) {
+            return res.status(403).json({ error: 'Path gambar tanda tangan tidak valid.' });
+          }
+
+          const { data: blob, error: dlErr } = await supabase.storage.from('signatures').download(providedPath);
+          if (dlErr || !blob) {
+            return res.status(400).json({ error: 'File gambar tanda tangan tidak ditemukan di penyimpanan.' });
+          }
+
+          const buffer = Buffer.from(await blob.arrayBuffer());
+          if (buffer.length > 2 * 1024 * 1024) {
+            await supabase.storage.from('signatures').remove([providedPath]);
+            return res.status(400).json({ error: 'Ukuran gambar tanda tangan maksimal 2 MB.' });
+          }
+          if (buffer.length < 8 || !buffer.subarray(0, 4).equals(pngHeader)) {
+            await supabase.storage.from('signatures').remove([providedPath]);
+            return res.status(400).json({ error: 'File gambar bukan PNG yang valid.' });
+          }
+
+          imagePath = providedPath;
+        } else {
+          if (!req.file) {
+            return res.status(400).json({ error: 'File gambar tanda tangan PNG wajib disediakan.' });
+          }
+          if (req.file.mimetype !== 'image/png') {
+            return res.status(400).json({ error: 'Gambar tanda tangan harus berformat PNG.' });
+          }
+          if (req.file.buffer.length < 8 || !req.file.buffer.subarray(0, 4).equals(pngHeader)) {
+            return res.status(400).json({ error: 'File gambar bukan PNG yang valid.' });
+          }
+          if (req.file.size > 2 * 1024 * 1024) {
+            return res.status(400).json({ error: 'Ukuran gambar tanda tangan maksimal 2 MB.' });
+          }
+
+          imagePath = `${req.profile!.id}/signature-${Date.now()}.png`;
+          const { error: upErr } = await supabase.storage
+            .from('signatures')
+            .upload(imagePath, req.file.buffer, {
+              contentType: 'image/png',
+              upsert: true,
+            });
+          if (upErr) return res.status(400).json({ error: upErr.message });
+        }
       }
 
       const payload = {
         user_id: req.profile!.id,
         signature_type: signatureType,
         image_path: imagePath,
-        typed_text: req.body.typed_text ? String(req.body.typed_text).trim() : req.profile!.full_name,
-        typed_font: req.body.typed_font ? String(req.body.typed_font) : 'cursive',
+        typed_text: req.body?.typed_text ? String(req.body.typed_text).trim() : req.profile!.full_name,
+        typed_font: req.body?.typed_font ? String(req.body.typed_font) : 'cursive',
       };
 
       const { data: saved, error: saveErr } = await supabase
@@ -1065,6 +1119,166 @@ export function createApiApp() {
     }
 
     return res.json({ data: { id: resolvedDocId, version_number: targetVersion } });
+  });
+
+  app.post('/api/documents/create-upload-url', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    const { document_id, version_number, file_name, file_size, mime_type } = req.body || {};
+    if (!document_id || !file_name) {
+      return res.status(400).json({ error: 'Document ID dan nama file PDF wajib disediakan.' });
+    }
+
+    const cleanName = String(file_name).trim();
+    const isPdfMime = !mime_type || mime_type === 'application/pdf' || mime_type === 'application/x-pdf';
+    if (!isPdfMime && !cleanName.toLowerCase().endsWith('.pdf')) {
+      return res.status(400).json({ error: 'File harus berupa dokumen PDF yang valid.' });
+    }
+
+    const supabase = getSupabaseAdmin();
+    const { data: doc, error: docErr } = await supabase
+      .from('documents')
+      .select('*')
+      .eq('id', document_id)
+      .single();
+
+    if (docErr || !doc) return res.status(404).json({ error: 'Dokumen tidak ditemukan.' });
+    if (doc.created_by !== req.profile!.id) {
+      return res.status(403).json({ error: 'Anda tidak berwenang mengunggah PDF untuk dokumen ini.' });
+    }
+    if (doc.is_locked && doc.status !== 'needs_revision') {
+      return res.status(400).json({ error: 'Dokumen sudah terkunci dan tidak dapat diubah.' });
+    }
+
+    const { data: settings } = await supabase.from('system_settings').select('max_file_size_mb').eq('id', 1).single();
+    const maxMb = settings?.max_file_size_mb || 5;
+    const sizeBytes = Number(file_size || 0);
+    if (!Number.isFinite(sizeBytes) || sizeBytes <= 0) {
+      return res.status(400).json({ error: 'Ukuran file PDF tidak valid.' });
+    }
+    if (sizeBytes > maxMb * 1024 * 1024) {
+      return res.status(400).json({ error: `Ukuran file melebihi batas maksimal (${maxMb} MB).` });
+    }
+
+    const vNum = parseInt(String(version_number || doc.current_version || 1), 10);
+    if (!Number.isFinite(vNum) || vNum < 1) {
+      return res.status(400).json({ error: 'Nomor versi dokumen tidak valid.' });
+    }
+
+    const safeName = cleanName.replace(/[^a-zA-Z0-9._-]/g, '_') || 'document.pdf';
+    const filePath = `${doc.id}/v${vNum}-${Date.now()}-${safeName}`;
+
+    const { data: signedData, error: signErr } = await supabase.storage
+      .from('documents-original')
+      .createSignedUploadUrl(filePath);
+
+    if (signErr || !signedData) {
+      return res.status(400).json({ error: signErr?.message || 'Gagal menyiapkan URL unggah PDF.' });
+    }
+
+    return res.json({
+      data: {
+        path: signedData.path,
+        token: signedData.token,
+        signedUrl: signedData.signedUrl,
+        maxFileSizeMb: maxMb,
+      },
+    });
+  });
+
+  app.post('/api/documents/register-pdf', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    const { document_id, version_number, file_path, file_name, notes } = req.body || {};
+    if (!document_id || !file_path || !file_name) {
+      return res.status(400).json({ error: 'Document ID, path file, dan nama file PDF wajib disediakan.' });
+    }
+
+    const cleanPath = String(file_path).trim();
+    if (!cleanPath.startsWith(`${String(document_id).trim()}/`) || cleanPath.includes('..')) {
+      return res.status(403).json({ error: 'Path file PDF tidak valid.' });
+    }
+
+    const supabase = getSupabaseAdmin();
+    const { data: doc, error: docErr } = await supabase
+      .from('documents')
+      .select('*')
+      .eq('id', document_id)
+      .single();
+
+    if (docErr || !doc) return res.status(404).json({ error: 'Dokumen tidak ditemukan.' });
+    if (doc.created_by !== req.profile!.id) {
+      return res.status(403).json({ error: 'Anda tidak berwenang mengunggah PDF untuk dokumen ini.' });
+    }
+    if (doc.is_locked && doc.status !== 'needs_revision') {
+      return res.status(400).json({ error: 'Dokumen sudah terkunci dan tidak dapat diubah.' });
+    }
+
+    const { data: blob, error: dlErr } = await supabase.storage.from('documents-original').download(cleanPath);
+    if (dlErr || !blob) {
+      return res.status(400).json({ error: 'File PDF yang diunggah tidak ditemukan di penyimpanan.' });
+    }
+
+    const buffer = Buffer.from(await blob.arrayBuffer());
+    const { data: settings } = await supabase.from('system_settings').select('max_file_size_mb').eq('id', 1).single();
+    const maxMb = settings?.max_file_size_mb || 5;
+    if (buffer.length > maxMb * 1024 * 1024) {
+      await supabase.storage.from('documents-original').remove([cleanPath]);
+      return res.status(400).json({ error: `Ukuran file melebihi batas maksimal (${maxMb} MB).` });
+    }
+
+    if (buffer.length < 5 || buffer.subarray(0, 5).toString('utf8') !== '%PDF-') {
+      await supabase.storage.from('documents-original').remove([cleanPath]);
+      return res.status(400).json({ error: 'File harus berupa dokumen PDF yang valid.' });
+    }
+
+    let pageCount = 1;
+    try {
+      const parsedPdf = await PDFDocument.load(buffer);
+      pageCount = parsedPdf.getPageCount();
+    } catch {
+      await supabase.storage.from('documents-original').remove([cleanPath]);
+      return res.status(400).json({ error: 'File PDF tidak dapat dibaca atau rusak.' });
+    }
+
+    const sha256Hash = crypto.createHash('sha256').update(buffer).digest('hex');
+    const vNum = parseInt(String(version_number || doc.current_version || 1), 10);
+
+    // Remove prior unsubmitted draft version if re-uploading same draft version number
+    if (doc.status === 'draft') {
+      await supabase
+        .from('document_versions')
+        .delete()
+        .eq('document_id', doc.id)
+        .eq('version_number', vNum);
+    }
+
+    const { data: versionRow, error: verErr } = await supabase
+      .from('document_versions')
+      .insert({
+        document_id: doc.id,
+        version_number: vNum,
+        file_path: cleanPath,
+        file_name: String(file_name),
+        file_size_bytes: buffer.length,
+        page_count: pageCount,
+        sha256_hash: sha256Hash,
+        uploaded_by: req.profile!.id,
+        notes: notes ? String(notes) : null,
+      })
+      .select()
+      .single();
+
+    if (verErr) {
+      await supabase.storage.from('documents-original').remove([cleanPath]);
+      return res.status(400).json({ error: verErr.message });
+    }
+
+    await writeAuditLog(
+      req.profile!.id,
+      'PDF_UPLOADED',
+      doc.id,
+      { version: vNum, file_name: String(file_name), sha256_hash: sha256Hash },
+      req
+    );
+
+    return res.json({ data: versionRow });
   });
 
   app.post(

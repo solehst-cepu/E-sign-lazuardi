@@ -19,7 +19,7 @@ import { OverlaySignatureField, PdfViewer } from '../components/PdfViewer';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
 import { ACTION_LABEL, formatBytes } from '../lib/format';
-import { apiFetch, supabase } from '../lib/supabaseClient';
+import { apiFetch, supabase, uploadPdfViaSignedUrl } from '../lib/supabaseClient';
 import {
   DocumentPriority,
   MasterDataItem,
@@ -395,16 +395,9 @@ export function CreateDocumentPage() {
     const resolvedDocId = saved.data.id;
     setDocId(resolvedDocId);
 
-    // Upload PDF if a new file was selected
+    // Upload PDF directly to private Supabase Storage via signed URL if a new file was selected
     if (pdfFile) {
-      const formData = new FormData();
-      formData.append('document_id', resolvedDocId);
-      formData.append('version_number', String(saved.data.version_number || 1));
-      formData.append('file', pdfFile);
-      await apiFetch('/api/documents/upload-pdf', {
-        method: 'POST',
-        body: formData,
-      });
+      await uploadPdfViaSignedUrl(resolvedDocId, saved.data.version_number || 1, pdfFile);
       setPdfFile(null); // Avoid re-uploading unless changed
     }
 

@@ -64,11 +64,16 @@ export function VerifyPage() {
     setError(null);
     setChecking(true);
     try {
-      const formData = new FormData();
-      formData.append('file', file);
+      const arrayBuffer = await file.arrayBuffer();
+      const digest = await window.crypto.subtle.digest('SHA-256', arrayBuffer);
+      const sha256Hash = Array.from(new Uint8Array(digest))
+        .map((b) => b.toString(16).padStart(2, '0'))
+        .join('');
+
       const res = await fetch(`/api/verify/${encodeURIComponent(token)}/check-hash`, {
         method: 'POST',
-        body: formData,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sha256_hash: sha256Hash }),
       });
       const data = await parseJsonSafe<HashCheckResult & { error?: string }>(res);
       if (!res.ok || !data) throw new Error(data?.error || 'Gagal memverifikasi hash file.');

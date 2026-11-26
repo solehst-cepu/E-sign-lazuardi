@@ -23,7 +23,7 @@ import { PriorityBadge, StatusBadge } from '../components/StatusBadge';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
 import { ACTION_LABEL, formatBytes, formatDurationBetween, formatJakartaDate } from '../lib/format';
-import { apiFetch, supabase } from '../lib/supabaseClient';
+import { apiFetch, supabase, uploadPdfViaSignedUrl } from '../lib/supabaseClient';
 import {
   ApprovalLog,
   DocumentRecord,
@@ -238,16 +238,7 @@ export function DocumentDetailPage() {
     setResubmitting(true);
     try {
       const nextVersion = doc.current_version + 1;
-      const formData = new FormData();
-      formData.append('document_id', doc.id);
-      formData.append('version_number', String(nextVersion));
-      formData.append('notes', `Revisi v${nextVersion}`);
-      formData.append('file', revisionFile);
-
-      await apiFetch('/api/documents/upload-pdf', {
-        method: 'POST',
-        body: formData,
-      });
+      await uploadPdfViaSignedUrl(doc.id, nextVersion, revisionFile, `Revisi v${nextVersion}`);
 
       await apiFetch(`/api/documents/${doc.id}/resubmit`, {
         method: 'POST',

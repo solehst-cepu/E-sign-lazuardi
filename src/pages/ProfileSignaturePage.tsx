@@ -5,7 +5,7 @@ import { AppLayout } from '../components/AppLayout';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
 import { ROLE_LABEL } from '../lib/format';
-import { apiFetch } from '../lib/supabaseClient';
+import { apiFetch, uploadSignaturePngViaSignedUrl } from '../lib/supabaseClient';
 import { SignatureProfile } from '../types';
 
 export function ProfileSignaturePage() {
@@ -110,8 +110,8 @@ export function ProfileSignaturePage() {
   const handleSaveSignature = async () => {
     setSaving(true);
     try {
-      const formData = new FormData();
-      formData.append('signature_type', mode);
+      let imagePath: string | null = null;
+      let typedPayload: string | undefined;
 
       if (mode === 'draw') {
         const canvas = canvasRef.current;
@@ -120,22 +120,26 @@ export function ProfileSignaturePage() {
         }
         const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'));
         if (!blob) throw new Error('Gagal memproses gambar tanda tangan.');
-        formData.append('image', blob, 'signature.png');
+        imagePath = await uploadSignaturePngViaSignedUrl(blob);
       } else if (mode === 'upload') {
         if (!uploadFile) {
           throw new Error('Silakan pilih file PNG tanda tangan terlebih dahulu.');
         }
-        formData.append('image', uploadFile);
+        imagePath = await uploadSignaturePngViaSignedUrl(uploadFile);
       } else {
         if (!typedText.trim()) {
           throw new Error('Nama tanda tangan tidak boleh kosong.');
         }
-        formData.append('typed_text', typedText.trim());
+        typedPayload = typedText.trim();
       }
 
       const res = await apiFetch<{ data: SignatureProfile }>('/api/signature-profile/save', {
         method: 'POST',
-        body: formData,
+        body: JSON.stringify({
+          signature_type: mode,
+          image_path: imagePath,
+          typed_text: typedPayload,
+        }),
       });
       setSigProfile(res.data);
       showToast('Representasi tanda tangan pribadi berhasil disimpan.', 'success');
