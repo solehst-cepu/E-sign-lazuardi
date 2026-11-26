@@ -1,9 +1,10 @@
 import crypto from 'crypto';
-import express, { NextFunction, Request, Response } from 'express';
+import express from 'express';
+import type { NextFunction, Request, Response } from 'express';
 import multer from 'multer';
 import { PDFDocument } from 'pdf-lib';
-import { generateAndStoreFinalPdf } from './pdfFinalizer.js';
-import { createStatelessAuthClient, getSupabaseAdmin, isSupabaseConfigured } from './supabase.js';
+import { generateAndStoreFinalPdf } from './pdfFinalizer.ts';
+import { createStatelessAuthClient, getSupabaseAdmin, getSupabaseConfig, isSupabaseConfigured } from './supabase.ts';
 
 interface AuthenticatedRequest extends Request {
   authUser?: {
@@ -78,14 +79,53 @@ async function requireAuth(req: AuthenticatedRequest, res: Response, next: NextF
       return res.status(401).json({ error: 'Sesi telah berakhir atau tidak valid.' });
     }
 
-    const { data: profile, error: profErr } = await supabase
+    let { data: profile, error: profErr } = await supabase
       .from('profiles')
       .select('*')
       .eq('id', userData.user.id)
       .single();
 
     if (profErr || !profile) {
-      return res.status(403).json({ error: 'Profil pengguna tidak ditemukan.' });
+      // Auto-provision first Super Admin profile if user was created directly in Supabase Auth Dashboard
+      const { count: superCount } = await supabase
+        .from('profiles')
+        .select('id', { count: 'exact', head: true })
+        .eq('role', 'super_admin');
+
+      const expectedEmail = process.env.INITIAL_SUPERADMIN_EMAIL?.trim().toLowerCase();
+      const userEmail = (userData.user.email || '').trim().toLowerCase();
+
+      if ((superCount || 0) === 0 && userEmail && (!expectedEmail || userEmail === expectedEmail)) {
+        const fallbackName =
+          (userData.user.user_metadata?.full_name as string) ||
+          userEmail.split('@')[0] ||
+          'Super Admin';
+
+        const { data: createdProf, error: createProfErr } = await supabase
+          .from('profiles')
+          .insert({
+            id: userData.user.id,
+            email: userEmail,
+            full_name: fallbackName,
+            job_title: 'Super Administrator',
+            role: 'super_admin',
+            is_active: true,
+            must_change_password: false,
+          })
+          .select('*')
+          .single();
+
+        if (!createProfErr && createdProf) {
+          profile = createdProf;
+          await writeAuditLog(createdProf.id, 'BOOTSTRAP_SUPERADMIN_ON_LOGIN', null, { email: userEmail }, req);
+        }
+      }
+    }
+
+    if (!profile) {
+      return res.status(403).json({
+        error: 'Profil pengguna belum terdaftar di sistem. Hubungi Admin atau periksa INITIAL_SUPERADMIN_EMAIL.',
+      });
     }
 
     if (!profile.is_active) {
@@ -156,6 +196,7 @@ export function createApiApp() {
         .eq('id', 1)
         .maybeSingle();
 
+      const { url, anonKey } = getSupabaseConfig();
       return res.json({
         ok: true,
         supabaseConfigured: true,
@@ -166,6 +207,7 @@ export function createApiApp() {
         maxFileSizeMb: settings?.max_file_size_mb || 5,
         qrEnabled: settings?.qr_enabled !== false,
         initialSuperAdminEmailHint: process.env.INITIAL_SUPERADMIN_EMAIL ? true : false,
+        publicSupabaseConfig: { url, anonKey },
       });
     } catch (err: any) {
       return res.status(500).json({
@@ -216,7 +258,14 @@ export function createApiApp() {
       });
 
       if (authErr || !createdAuth?.user) {
-        return res.status(400).json({ error: authErr?.message || 'Gagal membuat akun auth Super Admin.' });
+        const msg = authErr?.message || '';
+        if (msg.toLowerCase().includes('already') || msg.toLowerCase().includes('registered')) {
+          return res.status(409).json({
+            error:
+              'Email ini sudah terdaftar di Supabase Auth. Silakan pindah ke tab Login dan masuk menggunakan password Supabase Auth Anda.',
+          });
+        }
+        return res.status(400).json({ error: msg || 'Gagal membuat akun auth Super Admin.' });
       }
 
       const { error: profErr } = await supabase.from('profiles').insert({
@@ -1231,6 +1280,27 @@ export function createApiApp() {
       uploaded_hash: uploadedHash,
       verification_id: doc.verification_id,
     });
+  });
+
+  // Guarantee JSON responses for any unmatched /api/* route or Express/Multer error
+  app.use('/api', (_req: Request, res: Response) => {
+    return res.status(404).json({ error: 'Endpoint API tidak ditemukan.' });
+  });
+
+  app.use((err: any, req: Request, res: Response, next: NextFunction) => {
+    if (res.headersSent) return next(err);
+    if (req.path.startsWith('/api')) {
+      if (err?.type === 'entity.parse.failed') {
+        return res.status(400).json({ error: 'Format payload JSON tidak valid.' });
+      }
+      if (err?.code === 'LIMIT_FILE_SIZE') {
+        return res.status(400).json({ error: 'Ukuran file melebihi batas maksimal server.' });
+      }
+      return res.status(err?.status || 500).json({
+        error: err?.message || 'Terjadi kesalahan internal pada server.',
+      });
+    }
+    return next(err);
   });
 
   return app;

@@ -1,6 +1,12 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import { Session } from '@supabase/supabase-js';
-import { apiFetch, isClientSupabaseConfigured, supabase } from '../lib/supabaseClient';
+import {
+  apiFetch,
+  ensureSupabaseClient,
+  isClientSupabaseConfigured,
+  parseJsonSafe,
+  supabase,
+} from '../lib/supabaseClient';
 import { SystemSettings, UserProfile } from '../types';
 
 export interface SystemHealth {
@@ -13,6 +19,7 @@ export interface SystemHealth {
   maxFileSizeMb?: number;
   qrEnabled?: boolean;
   initialSuperAdminEmailHint?: boolean;
+  publicSupabaseConfig?: { url: string; anonKey: string };
   error?: string;
 }
 
@@ -26,7 +33,7 @@ interface AuthContextValue {
   authError: string | null;
   signIn: (email: string, password: string) => Promise<void>;
   signOut: () => Promise<void>;
-  refreshMe: () => Promise<void>;
+  refreshMe: () => Promise<UserProfile | null>;
   refreshHealth: () => Promise<void>;
 }
 
@@ -44,10 +51,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const refreshHealth = useCallback(async () => {
     try {
       const res = await fetch('/api/health');
-      const data = (await res.json()) as SystemHealth;
+      const data = await parseJsonSafe<SystemHealth>(res);
+      if (!data) {
+        throw new Error('Respons /api/health bukan JSON.');
+      }
+      if (data.publicSupabaseConfig?.url && data.publicSupabaseConfig?.anonKey) {
+        ensureSupabaseClient(data.publicSupabaseConfig.url, data.publicSupabaseConfig.anonKey);
+      }
       setHealth({
         ...data,
-        supabaseConfigured: Boolean(data.supabaseConfigured && isClientSupabaseConfigured),
+        supabaseConfigured: Boolean(data.supabaseConfigured && (isClientSupabaseConfigured || supabase)),
       });
     } catch {
       setHealth({
@@ -60,8 +73,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
-  const refreshMe = useCallback(async () => {
-    if (!supabase) return;
+  const refreshMe = useCallback(async (): Promise<UserProfile | null> => {
+    if (!supabase) return null;
     try {
       const me = await apiFetch<{
         profile: UserProfile;
@@ -72,14 +85,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setSettings(me.settings);
       setUnreadNotifications(me.unreadNotifications || 0);
       setAuthError(null);
+      return me.profile;
     } catch (err: any) {
       setAuthError(err?.message || 'Gagal memuat profil pengguna.');
       setProfile(null);
+      throw err;
     }
   }, []);
 
   useEffect(() => {
     let active = true;
+    let subscription: { unsubscribe: () => void } | null = null;
 
     async function init() {
       await refreshHealth();
@@ -88,31 +104,42 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
+      const { data: sub } = supabase.auth.onAuthStateChange(async (_event, nextSession) => {
+        if (!active) return;
+        setSession(nextSession);
+        if (nextSession) {
+          try {
+            await refreshMe();
+          } catch {
+            // Error handled in authError state
+          }
+        } else {
+          setProfile(null);
+          setUnreadNotifications(0);
+        }
+      });
+      subscription = sub.subscription;
+
       const { data } = await supabase.auth.getSession();
       if (!active) return;
       setSession(data.session);
       if (data.session) {
-        await refreshMe();
+        try {
+          await refreshMe();
+        } catch {
+          // Clear broken session if profile missing
+          await supabase.auth.signOut();
+          if (active) setSession(null);
+        }
       }
       if (active) setLoading(false);
     }
 
     init();
 
-    if (!supabase) return;
-    const { data: sub } = supabase.auth.onAuthStateChange(async (_event, nextSession) => {
-      setSession(nextSession);
-      if (nextSession) {
-        await refreshMe();
-      } else {
-        setProfile(null);
-        setUnreadNotifications(0);
-      }
-    });
-
     return () => {
       active = false;
-      sub.subscription.unsubscribe();
+      subscription?.unsubscribe();
     };
   }, [refreshHealth, refreshMe]);
 
@@ -124,7 +151,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       password,
     });
     if (error || !data.session) {
-      throw new Error('Email atau password tidak valid.');
+      const msg = error?.message || '';
+      if (msg.toLowerCase().includes('email not confirmed')) {
+        throw new Error('Email belum dikonfirmasi pada Supabase Auth.');
+      }
+      if (msg.toLowerCase().includes('invalid login credentials')) {
+        throw new Error('Email atau password tidak valid.');
+      }
+      if (msg.toLowerCase().includes('not valid json') || msg.toLowerCase().includes('unexpected token')) {
+        throw new Error('Server autentikasi mengembalikan respons tidak valid. Periksa konfigurasi VITE_SUPABASE_URL.');
+      }
+      throw new Error(msg || 'Gagal login.');
     }
     setSession(data.session);
     try {

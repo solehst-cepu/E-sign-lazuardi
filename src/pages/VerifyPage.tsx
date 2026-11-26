@@ -3,6 +3,7 @@ import { Link, useParams } from 'react-router-dom';
 import { AlertTriangle, CheckCircle2, FileCheck2, Loader2, ShieldAlert, Upload, XCircle } from 'lucide-react';
 import { BrandLogo } from '../components/BrandLogo';
 import { formatJakartaDate } from '../lib/format';
+import { parseJsonSafe } from '../lib/supabaseClient';
 
 interface VerifyMetadata {
   result: 'registered' | 'not_found' | 'cancelled';
@@ -35,13 +36,19 @@ export function VerifyPage() {
     if (!token) return;
     setLoading(true);
     fetch(`/api/verify/${encodeURIComponent(token)}`)
-      .then((r) => r.json())
+      .then(async (r) => {
+        const data = await parseJsonSafe<VerifyMetadata & { error?: string }>(r);
+        if (!r.ok || !data) {
+          throw new Error(data?.error || 'Gagal memuat data verifikasi.');
+        }
+        return data;
+      })
       .then((data) => {
         setMeta(data);
         setLoading(false);
       })
-      .catch(() => {
-        setError('Gagal menghubungi layanan verifikasi.');
+      .catch((err: any) => {
+        setError(err?.message || 'Gagal menghubungi layanan verifikasi.');
         setLoading(false);
       });
   }, [token]);
@@ -63,8 +70,8 @@ export function VerifyPage() {
         method: 'POST',
         body: formData,
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Gagal memverifikasi hash file.');
+      const data = await parseJsonSafe<HashCheckResult & { error?: string }>(res);
+      if (!res.ok || !data) throw new Error(data?.error || 'Gagal memverifikasi hash file.');
       setHashResult(data);
     } catch (err: any) {
       setError(err?.message || 'Gagal memeriksa file PDF.');

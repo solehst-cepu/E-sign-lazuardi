@@ -1,4 +1,5 @@
-import { createClient, SupabaseClient } from '@supabase/supabase-js';
+import { createClient } from '@supabase/supabase-js';
+import type { SupabaseClient } from '@supabase/supabase-js';
 
 function normalizeSupabaseUrl(rawUrl: string): string {
   return rawUrl.trim().replace(/\/rest\/v1\/?$/i, '').replace(/\/+$/, '');

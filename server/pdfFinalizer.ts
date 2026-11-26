@@ -1,7 +1,7 @@
 import crypto from 'crypto';
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 import QRCode from 'qrcode';
-import { getSupabaseAdmin } from './supabase.js';
+import { getSupabaseAdmin } from './supabase.ts';
 
 function formatWib(iso: string | Date): string {
   const d = typeof iso === 'string' ? new Date(iso) : iso;
