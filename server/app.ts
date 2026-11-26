@@ -116,33 +116,50 @@ async function requireAuth(req: AuthenticatedRequest, res: Response, next: NextF
 
       if ((superCount || 0) === 0 && userEmail && (!expectedEmail || userEmail === expectedEmail)) {
         const fallbackName =
-          (userData.user.user_metadata?.full_name as string) ||
+          String(userData.user.user_metadata?.full_name || '').trim() ||
           userEmail.split('@')[0] ||
           'Super Admin';
 
         const fallbackJob =
-          (userData.user.user_metadata?.job_title as string) || 'Super Administrator';
-        const fallbackEmployeeId =
-          (userData.user.user_metadata?.employee_id as string) || null;
+          String(userData.user.user_metadata?.job_title || '').trim() || 'Super Administrator';
+        const rawEmployeeId = String(userData.user.user_metadata?.employee_id || '').trim();
+        const fallbackEmployeeId = rawEmployeeId || null;
 
         const { data: createdProf, error: createProfErr } = await supabase
           .from('profiles')
-          .insert({
-            id: userData.user.id,
-            email: userEmail,
-            full_name: fallbackName,
-            job_title: fallbackJob,
-            employee_id: fallbackEmployeeId,
-            role: 'super_admin',
-            is_active: true,
-            must_change_password: false,
-          })
+          .upsert(
+            {
+              id: userData.user.id,
+              email: userEmail,
+              full_name: fallbackName,
+              job_title: fallbackJob,
+              employee_id: fallbackEmployeeId,
+              role: 'super_admin',
+              is_active: true,
+              must_change_password: false,
+            },
+            { onConflict: 'id' }
+          )
           .select('*')
           .single();
 
         if (!createProfErr && createdProf) {
           profile = createdProf;
           await writeAuditLog(createdProf.id, 'BOOTSTRAP_SUPERADMIN_ON_LOGIN', null, { email: userEmail }, req);
+        } else {
+          // Handle concurrent login request race condition by re-selecting once
+          const { data: retryProf } = await supabase
+            .from('profiles')
+            .select('*')
+            .eq('id', userData.user.id)
+            .maybeSingle();
+          if (retryProf) {
+            profile = retryProf;
+          } else if (createProfErr) {
+            return res.status(500).json({
+              error: `Gagal membuat profil Super Admin otomatis: ${createProfErr.message}`,
+            });
+          }
         }
       }
     }

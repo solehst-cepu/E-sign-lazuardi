@@ -1,4 +1,4 @@
-import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { Session } from '@supabase/supabase-js';
 import {
   apiFetch,
@@ -81,24 +81,35 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
+  const refreshMeInFlightRef = useRef<Promise<UserProfile | null> | null>(null);
+
   const refreshMe = useCallback(async (): Promise<UserProfile | null> => {
     if (!supabase) return null;
-    try {
-      const me = await apiFetch<{
-        profile: UserProfile;
-        settings: SystemSettings;
-        unreadNotifications: number;
-      }>('/api/me');
-      setProfile(me.profile);
-      setSettings(me.settings);
-      setUnreadNotifications(me.unreadNotifications || 0);
-      setAuthError(null);
-      return me.profile;
-    } catch (err: any) {
-      setAuthError(err?.message || 'Gagal memuat profil pengguna.');
-      setProfile(null);
-      throw err;
+    if (refreshMeInFlightRef.current) {
+      return refreshMeInFlightRef.current;
     }
+    const promise = (async () => {
+      try {
+        const me = await apiFetch<{
+          profile: UserProfile;
+          settings: SystemSettings;
+          unreadNotifications: number;
+        }>('/api/me');
+        setProfile(me.profile);
+        setSettings(me.settings);
+        setUnreadNotifications(me.unreadNotifications || 0);
+        setAuthError(null);
+        return me.profile;
+      } catch (err: any) {
+        setAuthError(err?.message || 'Gagal memuat profil pengguna.');
+        setProfile(null);
+        throw err;
+      } finally {
+        refreshMeInFlightRef.current = null;
+      }
+    })();
+    refreshMeInFlightRef.current = promise;
+    return promise;
   }, []);
 
   useEffect(() => {
