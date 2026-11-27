@@ -184,3 +184,30 @@ export async function uploadSignaturePngViaSignedUrl(file: Blob): Promise<string
   return path;
 }
 
+export async function downloadFileFromSignedUrl(url: string, fileName: string): Promise<void> {
+  try {
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error('Gagal mengunduh file PDF.');
+    }
+    const blob = await response.blob();
+    const objectUrl = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = objectUrl;
+    anchor.download = fileName;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 1500);
+  } catch {
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = fileName;
+    anchor.rel = 'noopener';
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+  }
+}
+
+

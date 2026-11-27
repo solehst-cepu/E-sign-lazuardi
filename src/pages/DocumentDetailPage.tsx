@@ -8,10 +8,12 @@ import {
   Download,
   FileUp,
   Lock,
+  MessageSquare,
   PenTool,
   Printer,
   QrCode,
   RotateCcw,
+  Send,
   ShieldCheck,
   XCircle,
 } from 'lucide-react';
@@ -23,9 +25,10 @@ import { PriorityBadge, StatusBadge } from '../components/StatusBadge';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
 import { ACTION_LABEL, formatBytes, formatDurationBetween, formatJakartaDate } from '../lib/format';
-import { apiFetch, supabase, uploadPdfViaSignedUrl } from '../lib/supabaseClient';
+import { apiFetch, downloadFileFromSignedUrl, supabase, uploadPdfViaSignedUrl } from '../lib/supabaseClient';
 import {
   ApprovalLog,
+  DocumentComment,
   DocumentRecord,
   DocumentSigner,
   DocumentVersion,
@@ -43,6 +46,11 @@ export function DocumentDetailPage() {
   const [signers, setSigners] = useState<DocumentSigner[]>([]);
   const [fields, setFields] = useState<SignatureField[]>([]);
   const [logs, setLogs] = useState<ApprovalLog[]>([]);
+  const [comments, setComments] = useState<DocumentComment[]>([]);
+  const [commentText, setCommentText] = useState('');
+  const [commentPage, setCommentPage] = useState('');
+  const [postingComment, setPostingComment] = useState(false);
+  const [downloadingPdf, setDownloadingPdf] = useState(false);
   const [pdfUrl, setPdfUrl] = useState<string | null>(null);
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -117,6 +125,13 @@ export function DocumentDetailPage() {
       setSigners((signerRows as DocumentSigner[]) || []);
       setFields((fieldRows as SignatureField[]) || []);
       setLogs((logRows as ApprovalLog[]) || []);
+
+      try {
+        const commentRes = await apiFetch<{ data: DocumentComment[] }>(`/api/documents/${id}/comments`);
+        setComments(commentRes.data || []);
+      } catch {
+        setComments([]);
+      }
 
       // Fetch short-lived signed URL for PDF preview only when opening document detail
       if ((verRows && verRows.length > 0) || docRow.final_pdf_path) {
@@ -255,13 +270,55 @@ export function DocumentDetailPage() {
     }
   };
 
+  const handlePostComment = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!doc) return;
+    const trimmed = commentText.trim();
+    if (!trimmed) {
+      showToast('Tulis komentar terlebih dahulu.', 'error');
+      return;
+    }
+    setPostingComment(true);
+    try {
+      const res = await apiFetch<{ data: DocumentComment }>(`/api/documents/${doc.id}/comments`, {
+        method: 'POST',
+        body: JSON.stringify({
+          comment: trimmed,
+          page_number: commentPage ? parseInt(commentPage, 10) : null,
+        }),
+      });
+      setComments((prev) => [...prev, res.data]);
+      setCommentText('');
+      setCommentPage('');
+      showToast('Komentar berhasil ditambahkan.', 'success');
+    } catch (err: any) {
+      showToast(err?.message || 'Gagal mengirim komentar.', 'error');
+    } finally {
+      setPostingComment(false);
+    }
+  };
+
   const handleDownloadPdf = async (kind: 'auto' | 'original' | 'final' = 'auto') => {
     if (!doc) return;
+    setDownloadingPdf(true);
     try {
-      const res = await apiFetch<{ url: string }>(`/api/documents/${doc.id}/pdf-url?kind=${kind}&download=1`);
-      window.open(res.url, '_blank', 'noopener');
+      const res = await apiFetch<{ url: string; fileName?: string; isSignedFinal?: boolean }>(
+        `/api/documents/${doc.id}/pdf-url?kind=${kind}&download=1`
+      );
+      const fallbackName = `${doc.document_number.replace(/[^a-zA-Z0-9._-]+/g, '-')}${
+        kind === 'final' || res.isSignedFinal ? '-SIGNED' : ''
+      }.pdf`;
+      await downloadFileFromSignedUrl(res.url, res.fileName || fallbackName);
+      showToast(
+        res.isSignedFinal || kind === 'final'
+          ? 'PDF Signed berhasil diunduh.'
+          : 'File PDF berhasil diunduh.',
+        'success'
+      );
     } catch (err: any) {
       showToast(err?.message || 'Gagal mengunduh PDF.', 'error');
+    } finally {
+      setDownloadingPdf(false);
     }
   };
 
@@ -334,11 +391,12 @@ export function DocumentDetailPage() {
             <>
               <button
                 type="button"
+                disabled={downloadingPdf}
                 onClick={() => handleDownloadPdf('final')}
-                className="inline-flex items-center gap-1.5 rounded-lg bg-[#1755CE] px-3.5 py-2 text-xs font-semibold text-white hover:bg-[#1244A8]"
+                className="inline-flex items-center gap-1.5 rounded-lg bg-[#1755CE] px-3.5 py-2 text-xs font-semibold text-white hover:bg-[#1244A8] disabled:opacity-60"
               >
                 <Download className="h-4 w-4" />
-                <span>Download PDF</span>
+                <span>{downloadingPdf ? 'Mengunduh...' : 'Download PDF Signed'}</span>
               </button>
               <button
                 type="button"
@@ -353,6 +411,32 @@ export function DocumentDetailPage() {
         </div>
       }
     >
+      {/* Completed / Signed Document Banner */}
+      {isCompletedOrArchived && (
+        <div className="mb-6 rounded-lg border border-emerald-200 bg-emerald-50/80 p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="flex items-start gap-3">
+            <CheckCircle2 className="h-5 w-5 shrink-0 text-[#16A34A] mt-0.5" />
+            <div>
+              <h2 className="font-display text-sm font-semibold text-emerald-950">
+                Dokumen Telah Selesai Ditandatangani (PDF Signed)
+              </h2>
+              <p className="mt-1 text-xs text-emerald-900">
+                Seluruh tanda tangan elektronik, stempel QR verifikasi, dan lembar riwayat persetujuan telah disematkan pada file PDF final.
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            disabled={downloadingPdf}
+            onClick={() => handleDownloadPdf('final')}
+            className="inline-flex items-center justify-center gap-2 rounded-lg bg-[#16A34A] px-4 py-2.5 text-xs font-semibold text-white hover:bg-emerald-700 disabled:opacity-60 shrink-0"
+          >
+            <Download className="h-4 w-4" />
+            <span>{downloadingPdf ? 'Menyiapkan PDF Signed...' : 'Download PDF Signed'}</span>
+          </button>
+        </div>
+      )}
+
       {/* Active Signer Action Banner */}
       {isCurrentActiveSigner && activeSigner && (
         <div className="mb-6 rounded-lg border border-blue-300 bg-blue-50/80 p-5 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
@@ -411,6 +495,16 @@ export function DocumentDetailPage() {
               </button>
             )}
 
+            <button
+              type="button"
+              onClick={() =>
+                document.getElementById('komentar-dokumen')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+              }
+              className="inline-flex items-center gap-1.5 rounded-lg border border-blue-300 bg-white px-3.5 py-2 text-xs font-semibold text-[#1755CE] hover:bg-blue-50"
+            >
+              <MessageSquare className="h-3.5 w-3.5" />
+              <span>Komentar ({comments.length})</span>
+            </button>
             <button
               type="button"
               onClick={() =>
@@ -490,6 +584,119 @@ export function DocumentDetailPage() {
             fields={isCompletedOrArchived ? [] : overlayFields}
             editable={false}
           />
+
+          {/* Review & Pre-Signature Comments Section */}
+          <div id="komentar-dokumen" className="rounded-lg border border-slate-200 bg-white p-5">
+            <div className="flex items-center justify-between gap-3 border-b border-slate-100 pb-3">
+              <div className="flex items-center gap-2">
+                <MessageSquare className="h-4 w-4 text-[#1755CE]" />
+                <h3 className="font-display text-sm font-semibold text-[#163A70]">
+                  Komentar Review &amp; Penandatanganan
+                </h3>
+              </div>
+              <span className="rounded-md bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-700 tabular-nums">
+                {comments.length} Komentar
+              </span>
+            </div>
+
+            {comments.length === 0 ? (
+              <p className="mt-4 rounded-lg border border-dashed border-slate-200 bg-slate-50/70 px-4 py-5 text-center text-xs text-slate-500">
+                Belum ada komentar. Reviewer, penandatangan, atau pemohon dapat menuliskan catatan atau masukan pada dokumen di sini.
+              </p>
+            ) : (
+              <div className="mt-4 space-y-3">
+                {comments.map((c) => {
+                  const initials = c.author_name
+                    .split(' ')
+                    .map((w) => w[0])
+                    .slice(0, 2)
+                    .join('')
+                    .toUpperCase();
+                  return (
+                    <div key={c.id} className="rounded-lg border border-slate-200 bg-slate-50/50 p-3.5">
+                      <div className="flex flex-wrap items-start justify-between gap-2">
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[#163A70] text-[10px] font-semibold text-white">
+                            {initials || 'U'}
+                          </div>
+                          <div className="min-w-0">
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <span className="text-xs font-semibold text-slate-900">{c.author_name}</span>
+                              {c.author_role && (
+                                <span className="rounded border border-blue-200 bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-[#1755CE]">
+                                  {c.author_role}
+                                </span>
+                              )}
+                              {c.page_number && (
+                                <span className="rounded border border-slate-200 bg-white px-1.5 py-0.5 text-[10px] font-medium text-slate-700">
+                                  Halaman {c.page_number}
+                                </span>
+                              )}
+                              <span className="text-[10px] font-mono text-slate-400">v{c.version_number}</span>
+                            </div>
+                            {c.author_job_title && (
+                              <p className="text-[11px] text-slate-500 truncate">{c.author_job_title}</p>
+                            )}
+                          </div>
+                        </div>
+                        <span className="text-[11px] text-slate-400 tabular-nums shrink-0">
+                          {formatJakartaDate(c.created_at)}
+                        </span>
+                      </div>
+                      <p className="mt-2.5 whitespace-pre-wrap text-xs leading-relaxed text-slate-800 pl-9">
+                        {c.comment}
+                      </p>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {!['archived', 'cancelled'].includes(doc.status) && (
+              <form onSubmit={handlePostComment} className="mt-4 border-t border-slate-100 pt-4 space-y-3">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <label className="text-xs font-medium text-slate-700">
+                    Tambah Komentar / Catatan Review
+                  </label>
+                  <select
+                    value={commentPage}
+                    onChange={(e) => setCommentPage(e.target.value)}
+                    className="rounded-lg border border-slate-300 bg-white px-2.5 py-1 text-xs text-slate-700 focus:border-[#1755CE] focus:outline-none"
+                  >
+                    <option value="">Umum (Seluruh Dokumen)</option>
+                    {Array.from({ length: Math.max(1, activeVersion?.page_count || 1) }, (_, idx) => idx + 1).map(
+                      (p) => (
+                        <option key={p} value={String(p)}>
+                          Terkait Halaman {p}
+                        </option>
+                      )
+                    )}
+                  </select>
+                </div>
+                <textarea
+                  rows={3}
+                  value={commentText}
+                  onChange={(e) => setCommentText(e.target.value)}
+                  maxLength={2000}
+                  placeholder="Tulis catatan review, poin yang perlu diperbaiki, atau konfirmasi sebelum penandatanganan..."
+                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs text-slate-800 focus:border-[#1755CE] focus:outline-none"
+                />
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-[11px] text-slate-400">
+                    Komentar tercatat dalam riwayat dokumen dan memberi notifikasi kepada pihak terkait.
+                  </span>
+                  <button
+                    type="submit"
+                    disabled={postingComment || !commentText.trim()}
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-[#1755CE] px-3.5 py-2 text-xs font-semibold text-white hover:bg-[#1244A8] disabled:opacity-50 shrink-0"
+                  >
+                    <Send className="h-3.5 w-3.5" />
+                    <span>{postingComment ? 'Mengirim...' : 'Kirim Komentar'}</span>
+                  </button>
+                </div>
+              </form>
+            )}
+          </div>
 
           {/* Previous Versions History */}
           {versions.length > 0 && (

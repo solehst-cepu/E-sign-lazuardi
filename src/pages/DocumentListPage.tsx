@@ -7,7 +7,7 @@ import { PriorityBadge, StatusBadge } from '../components/StatusBadge';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
 import { ACTION_LABEL, formatJakartaDate, STATUS_META } from '../lib/format';
-import { apiFetch, supabase } from '../lib/supabaseClient';
+import { apiFetch, downloadFileFromSignedUrl, supabase } from '../lib/supabaseClient';
 import { DocumentStatus, MasterDataItem } from '../types';
 
 interface DocumentListPageProps {
@@ -153,12 +153,16 @@ export function DocumentListPage({ mode }: DocumentListPageProps) {
     loadList();
   }, [loadList]);
 
-  const handleDownloadPdf = async (docId: string) => {
+  const handleDownloadPdf = async (docId: string, docNumber?: string) => {
     try {
-      const res = await apiFetch<{ url: string }>(`/api/documents/${docId}/pdf-url?download=1`);
-      window.open(res.url, '_blank', 'noopener');
+      const res = await apiFetch<{ url: string; fileName?: string }>(
+        `/api/documents/${docId}/pdf-url?kind=final&download=1`
+      );
+      const fallback = `${(docNumber || 'dokumen').replace(/[^a-zA-Z0-9._-]+/g, '-')}-SIGNED.pdf`;
+      await downloadFileFromSignedUrl(res.url, res.fileName || fallback);
+      showToast('PDF Signed berhasil diunduh.', 'success');
     } catch (err: any) {
-      showToast(err?.message || 'Gagal mengunduh PDF.', 'error');
+      showToast(err?.message || 'Gagal mengunduh PDF Signed.', 'error');
     }
   };
 
@@ -452,11 +456,12 @@ export function DocumentListPage({ mode }: DocumentListPageProps) {
                             <>
                               <button
                                 type="button"
-                                onClick={() => handleDownloadPdf(doc.id)}
-                                className="rounded border border-slate-200 p-1.5 text-slate-600 hover:bg-slate-100"
-                                title="Unduh Final PDF"
+                                onClick={() => handleDownloadPdf(doc.id, doc.document_number)}
+                                className="inline-flex items-center gap-1 rounded border border-emerald-200 bg-emerald-50 px-2 py-1 text-[11px] font-semibold text-emerald-800 hover:bg-emerald-100"
+                                title="Download PDF Signed (Selesai Ditandatangani)"
                               >
                                 <Download className="h-3.5 w-3.5" />
+                                <span>PDF Signed</span>
                               </button>
                               <button
                                 type="button"

@@ -387,6 +387,66 @@ export async function generateAndStoreFinalPdf(documentId: string): Promise<{
       }
       y -= 6;
     }
+
+    // Include review & discussion comments if any
+    let reviewComments: any[] = [];
+    const { data: dcRows, error: dcErr } = await supabase
+      .from('document_comments')
+      .select('author_name, author_job_title, page_number, comment, created_at')
+      .eq('document_id', documentId)
+      .order('created_at', { ascending: true });
+
+    if (!dcErr && dcRows) {
+      reviewComments = dcRows;
+    } else {
+      const { data: alRows } = await supabase
+        .from('audit_logs')
+        .select('details, created_at')
+        .eq('document_id', documentId)
+        .eq('activity_name', 'DOCUMENT_COMMENT')
+        .order('created_at', { ascending: true });
+      reviewComments = (alRows || []).map((row: any) => ({
+        author_name: row.details?.author_name || 'Pengguna',
+        author_job_title: row.details?.author_job_title || '',
+        page_number: row.details?.page_number ?? null,
+        comment: row.details?.comment || '',
+        created_at: row.created_at,
+      }));
+    }
+
+    if (reviewComments.length > 0 && y > 110) {
+      y -= 8;
+      histPage.drawText('Komentar Review & Penandatanganan', {
+        x: 42,
+        y,
+        size: 10,
+        font: fontBold,
+        color: rgb(0.09, 0.23, 0.44),
+      });
+      y -= 15;
+
+      for (const c of reviewComments) {
+        if (y < 60) break;
+        const pageTag = c.page_number ? ` [Hal. ${c.page_number}]` : '';
+        const header = `${formatWib(c.created_at)}  |  ${sanitizePdfText(c.author_name)}${pageTag}`;
+        histPage.drawText(header.slice(0, 95), {
+          x: 42,
+          y,
+          size: 8,
+          font: fontBold,
+          color: rgb(0.15, 0.2, 0.28),
+        });
+        y -= 11;
+        histPage.drawText(sanitizePdfText(String(c.comment || '')).replace(/\s+/g, ' ').slice(0, 96), {
+          x: 52,
+          y,
+          size: 7.5,
+          font: fontRegular,
+          color: rgb(0.28, 0.34, 0.42),
+        });
+        y -= 13;
+      }
+    }
   }
 
   // Save final PDF & compute final SHA-256 hash AFTER all signatures and QR code are embedded
@@ -398,7 +458,7 @@ export async function generateAndStoreFinalPdf(documentId: string): Promise<{
     .from('documents-final')
     .upload(finalPdfPath, Buffer.from(finalBytes), {
       contentType: 'application/pdf',
-      upsert: false,
+      upsert: true,
     });
 
   if (uploadError) {

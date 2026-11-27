@@ -224,6 +224,19 @@ export interface AuditLogItem {
   document?: { document_number: string; title: string } | null;
 }
 
+export interface DocumentComment {
+  id: string;
+  document_id: string;
+  version_number: number;
+  user_id: string;
+  author_name: string;
+  author_job_title: string;
+  author_role?: string;
+  page_number: number | null;
+  comment: string;
+  created_at: string;
+}
+
 export interface SystemSettings {
   id: number;
   app_name: string;

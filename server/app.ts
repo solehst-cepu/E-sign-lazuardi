@@ -1712,9 +1712,34 @@ export function createApiApp() {
 
     let bucket = 'documents-original';
     let path = '';
-    if ((kind === 'final' || (kind === 'auto' && doc.final_pdf_path)) && doc.final_pdf_path) {
+    let resolvedFinalPath = doc.final_pdf_path;
+
+    // Self-heal final PDF if document finished signing/finalizing but final_pdf_path is not yet stored
+    if (
+      (kind === 'final' || kind === 'auto') &&
+      !resolvedFinalPath &&
+      ['finalizing', 'completed', 'archived'].includes(doc.status)
+    ) {
+      try {
+        const finalized = await generateAndStoreFinalPdf(docId);
+        resolvedFinalPath = finalized.finalPdfPath;
+      } catch (finErr: any) {
+        if (kind === 'final') {
+          return res.status(500).json({
+            error: `Gagal menghasilkan PDF bertanda tangan: ${finErr?.message || 'Unknown error'}`,
+          });
+        }
+      }
+    }
+
+    const isSignedFinal = Boolean((kind === 'final' || kind === 'auto') && resolvedFinalPath);
+    if (kind === 'final' && !resolvedFinalPath) {
+      return res.status(400).json({ error: 'PDF yang telah selesai ditandatangani belum tersedia.' });
+    }
+
+    if (isSignedFinal && resolvedFinalPath) {
       bucket = 'documents-final';
-      path = doc.final_pdf_path;
+      path = resolvedFinalPath;
     } else {
       const targetVer = versionParam || doc.current_version;
       const { data: ver } = await supabase
@@ -1727,19 +1752,248 @@ export function createApiApp() {
       path = ver.file_path;
     }
 
+    const safeDocNum =
+      String(doc.document_number || 'dokumen')
+        .replace(/[^a-zA-Z0-9._-]+/g, '-')
+        .replace(/^-+|-+$/g, '') || 'dokumen';
+    const downloadFileName = isSignedFinal
+      ? `${safeDocNum}-SIGNED.pdf`
+      : `${safeDocNum}-v${versionParam || doc.current_version}.pdf`;
+
     const { data: signed, error: signErr } = await supabase.storage
       .from(bucket)
-      .createSignedUrl(path, 120, isDownload ? { download: `${doc.document_number}.pdf` } : undefined);
+      .createSignedUrl(path, 120, isDownload ? { download: downloadFileName } : undefined);
 
     if (signErr || !signed?.signedUrl) {
       return res.status(500).json({ error: 'Gagal membuat tautan akses PDF sementara.' });
     }
 
     if (isDownload) {
-      await writeAuditLog(req.profile!.id, 'DOCUMENT_DOWNLOADED', docId, { bucket, path }, req);
+      await writeAuditLog(req.profile!.id, 'DOCUMENT_DOWNLOADED', docId, { bucket, path, fileName: downloadFileName }, req);
     }
 
-    return res.json({ url: signed.signedUrl, bucket });
+    return res.json({
+      url: signed.signedUrl,
+      bucket,
+      fileName: downloadFileName,
+      isSignedFinal,
+    });
+  });
+
+  // ============================================================================
+  // DOCUMENTS: REVIEW & PRE-SIGNATURE COMMENTS
+  // ============================================================================
+  app.get('/api/documents/:id/comments', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    const docId = String(req.params.id || '').trim();
+    const supabase = getSupabaseAdmin();
+
+    const { data: doc } = await supabase
+      .from('documents')
+      .select('id, created_by')
+      .eq('id', docId)
+      .single();
+    if (!doc) return res.status(404).json({ error: 'Dokumen tidak ditemukan.' });
+
+    const isAdmin = ['super_admin', 'admin'].includes(req.profile!.role);
+    const isCreator = doc.created_by === req.profile!.id;
+    let isSigner = false;
+    if (!isAdmin && !isCreator) {
+      const { data: signerRow } = await supabase
+        .from('document_signers')
+        .select('id')
+        .eq('document_id', docId)
+        .eq('user_id', req.profile!.id)
+        .maybeSingle();
+      isSigner = Boolean(signerRow);
+    }
+    if (!isAdmin && !isCreator && !isSigner) {
+      return res.status(403).json({ error: 'Anda tidak memiliki hak akses ke komentar dokumen ini.' });
+    }
+
+    const { data: commentRows, error: dcErr } = await supabase
+      .from('document_comments')
+      .select('*')
+      .eq('document_id', docId)
+      .order('created_at', { ascending: true });
+
+    if (!dcErr && commentRows) {
+      return res.json({ data: commentRows });
+    }
+
+    // Fallback: read from audit_logs if document_comments migration has not been applied yet
+    const { data: auditRows, error: alErr } = await supabase
+      .from('audit_logs')
+      .select('id, document_id, user_id, details, created_at')
+      .eq('document_id', docId)
+      .eq('activity_name', 'DOCUMENT_COMMENT')
+      .order('created_at', { ascending: true });
+
+    if (alErr) {
+      return res.status(500).json({ error: alErr.message });
+    }
+
+    const mapped = (auditRows || []).map((row: any) => ({
+      id: row.id,
+      document_id: row.document_id,
+      version_number: Number(row.details?.version_number || 1),
+      user_id: row.user_id,
+      author_name: String(row.details?.author_name || 'Pengguna'),
+      author_job_title: String(row.details?.author_job_title || ''),
+      author_role: String(row.details?.author_role || ''),
+      page_number: row.details?.page_number ?? null,
+      comment: String(row.details?.comment || ''),
+      created_at: row.created_at,
+    }));
+
+    return res.json({ data: mapped });
+  });
+
+  app.post('/api/documents/:id/comments', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    const docId = String(req.params.id || '').trim();
+    const rawComment = String(req.body?.comment || '').trim();
+    const rawPage = req.body?.page_number;
+
+    if (!rawComment) {
+      return res.status(400).json({ error: 'Isi komentar tidak boleh kosong.' });
+    }
+    if (rawComment.length > 2000) {
+      return res.status(400).json({ error: 'Komentar maksimal 2.000 karakter.' });
+    }
+
+    let pageNumber: number | null = null;
+    if (rawPage !== null && rawPage !== undefined && rawPage !== '') {
+      const parsedPage = parseInt(String(rawPage), 10);
+      if (!Number.isFinite(parsedPage) || parsedPage < 1) {
+        return res.status(400).json({ error: 'Nomor halaman komentar tidak valid.' });
+      }
+      pageNumber = parsedPage;
+    }
+
+    const supabase = getSupabaseAdmin();
+    const { data: doc } = await supabase
+      .from('documents')
+      .select('id, title, document_number, status, current_version, current_step_order, created_by')
+      .eq('id', docId)
+      .single();
+
+    if (!doc) return res.status(404).json({ error: 'Dokumen tidak ditemukan.' });
+    if (['archived', 'cancelled'].includes(doc.status)) {
+      return res.status(400).json({ error: 'Komentar tidak dapat ditambahkan pada dokumen yang diarsipkan atau dibatalkan.' });
+    }
+
+    const isAdmin = ['super_admin', 'admin'].includes(req.profile!.role);
+    const isCreator = doc.created_by === req.profile!.id;
+    const { data: signers } = await supabase
+      .from('document_signers')
+      .select('id, user_id, action_type, status')
+      .eq('document_id', docId);
+
+    const userSigner = (signers || []).find((s: any) => s.user_id === req.profile!.id);
+    if (!isAdmin && !isCreator && !userSigner) {
+      return res.status(403).json({ error: 'Anda tidak berwenang menambahkan komentar pada dokumen ini.' });
+    }
+
+    let authorRole = 'Admin';
+    if (isCreator) {
+      authorRole = 'Pemohon';
+    } else if (userSigner) {
+      authorRole =
+        userSigner.action_type === 'review'
+          ? 'Reviewer'
+          : userSigner.action_type === 'approve'
+          ? 'Approver'
+          : 'Penandatangan';
+    }
+
+    let savedComment: any = null;
+
+    const { data: inserted, error: insErr } = await supabase
+      .from('document_comments')
+      .insert({
+        document_id: docId,
+        version_number: doc.current_version || 1,
+        user_id: req.profile!.id,
+        author_name: req.profile!.full_name,
+        author_job_title: req.profile!.job_title || '',
+        author_role: authorRole,
+        page_number: pageNumber,
+        comment: rawComment,
+      })
+      .select('*')
+      .single();
+
+    if (!insErr && inserted) {
+      savedComment = inserted;
+      await writeAuditLog(
+        req.profile!.id,
+        'DOCUMENT_COMMENT_ADDED',
+        docId,
+        { version_number: doc.current_version || 1, page_number: pageNumber },
+        req
+      );
+    } else {
+      // Fallback: persist into audit_logs so comments work immediately even before optional table migration
+      const details = {
+        version_number: doc.current_version || 1,
+        author_name: req.profile!.full_name,
+        author_job_title: req.profile!.job_title || '',
+        author_role: authorRole,
+        page_number: pageNumber,
+        comment: rawComment,
+      };
+      const { data: auditInserted, error: auditErr } = await supabase
+        .from('audit_logs')
+        .insert({
+          user_id: req.profile!.id,
+          activity_name: 'DOCUMENT_COMMENT',
+          document_id: docId,
+          details,
+          ip_address: req.ip || null,
+        })
+        .select('id, document_id, user_id, details, created_at')
+        .single();
+
+      if (auditErr || !auditInserted) {
+        return res.status(500).json({ error: auditErr?.message || 'Gagal menyimpan komentar.' });
+      }
+
+      savedComment = {
+        id: auditInserted.id,
+        document_id: auditInserted.document_id,
+        version_number: details.version_number,
+        user_id: auditInserted.user_id,
+        author_name: details.author_name,
+        author_job_title: details.author_job_title,
+        author_role: details.author_role,
+        page_number: details.page_number,
+        comment: details.comment,
+        created_at: auditInserted.created_at,
+      };
+    }
+
+    // Notify creator and active signer (excluding commenter)
+    const notifyTargets = new Set<string>();
+    if (doc.created_by && doc.created_by !== req.profile!.id) {
+      notifyTargets.add(doc.created_by);
+    }
+    const activeSigner = (signers || []).find((s: any) => s.status === 'active');
+    if (activeSigner && activeSigner.user_id !== req.profile!.id) {
+      notifyTargets.add(activeSigner.user_id);
+    }
+    if (notifyTargets.size > 0) {
+      const preview = rawComment.length > 90 ? `${rawComment.slice(0, 87)}...` : rawComment;
+      await supabase.from('notifications').insert(
+        Array.from(notifyTargets).map((uid) => ({
+          user_id: uid,
+          document_id: docId,
+          title: 'Komentar Baru pada Dokumen',
+          message: `${req.profile!.full_name} berkomentar pada "${doc.title}" (${doc.document_number}): "${preview}"`,
+          type: 'info',
+        }))
+      );
+    }
+
+    return res.status(201).json({ data: savedComment });
   });
 
   // ============================================================================
